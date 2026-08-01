@@ -281,7 +281,7 @@ rate_limit_until = {}
 # MODAL 1: BASIC INFO (Name + Token + Channels)
 # =============================================================
 
-class AddAccountModal1(Modal, title='F-Society | Add Account (1/2)'):
+class AddAccountModal1(Modal, title='Step 1/2'):
     """First modal for adding account - Basic Info."""
     
     account_name = TextInput(
@@ -302,7 +302,7 @@ class AddAccountModal1(Modal, title='F-Society | Add Account (1/2)'):
     
     channel_ids = TextInput(
         label='📋 Channel IDs',
-        placeholder='Enter channel IDs separated by commas (e.g., 123456789,987654321)',
+        placeholder='Enter channel IDs separated by commas',
         required=True,
         max_length=500,
         style=discord.TextStyle.paragraph
@@ -310,7 +310,6 @@ class AddAccountModal1(Modal, title='F-Society | Add Account (1/2)'):
     
     async def on_submit(self, interaction: discord.Interaction):
         # Store data and open second modal
-        self.interaction = interaction
         modal2 = AddAccountModal2(
             account_name=self.account_name.value,
             token=self.token.value,
@@ -319,10 +318,10 @@ class AddAccountModal1(Modal, title='F-Society | Add Account (1/2)'):
         await interaction.response.send_modal(modal2)
 
 # =============================================================
-# MODAL 2: MESSAGE + SETTINGS (Message + Delay + Interval)
+# MODAL 2: MESSAGE + SETTINGS
 # =============================================================
 
-class AddAccountModal2(Modal, title='F-Society | Add Account (2/2)'):
+class AddAccountModal2(Modal, title='Step 2/2'):
     """Second modal for adding account - Message + Settings."""
     
     def __init__(self, account_name: str, token: str, channels: str):
@@ -340,7 +339,7 @@ class AddAccountModal2(Modal, title='F-Society | Add Account (2/2)'):
     )
     
     delay = TextInput(
-        label='⏳ Delay Between Messages (seconds)',
+        label='⏳ Delay (seconds)',
         placeholder='Default: 30 seconds',
         required=False,
         max_length=10,
@@ -348,8 +347,8 @@ class AddAccountModal2(Modal, title='F-Society | Add Account (2/2)'):
     )
     
     interval = TextInput(
-        label='⏱️ Send Interval (minutes)',
-        placeholder='How often to send? Default: 1 minute',
+        label='⏱️ Interval (minutes)',
+        placeholder='Default: 1 minute',
         required=False,
         max_length=10,
         default='1'
@@ -479,7 +478,7 @@ class AddAccountModal2(Modal, title='F-Society | Add Account (2/2)'):
 # CONFIRM DELETE MODAL
 # =============================================================
 
-class ConfirmDeleteModal(Modal, title='F-Society | Delete Account'):
+class ConfirmDeleteModal(Modal, title='Delete?'):
     """Modal for confirming account deletion."""
     
     confirm = TextInput(
@@ -538,16 +537,16 @@ class MainPanelView(View):
     def __init__(self):
         super().__init__(timeout=None)
         self.add_item(Button(label="🔄 Refresh", style=discord.ButtonStyle.primary, custom_id="refresh_panel"))
-        self.add_item(Button(label="➕ Add Account", style=discord.ButtonStyle.success, custom_id="add_account_modal"))
+        self.add_item(Button(label="➕ Add", style=discord.ButtonStyle.success, custom_id="add_account_modal"))
 
 class EditAccountView(View):
     def __init__(self, account_name: str):
         super().__init__(timeout=None)
         self.account_name = account_name
-        self.add_item(Button(label="📝 Change Message", style=discord.ButtonStyle.primary, custom_id=f"edit_msg_{account_name}"))
-        self.add_item(Button(label="📋 Add Channels", style=discord.ButtonStyle.primary, custom_id=f"edit_channels_{account_name}"))
-        self.add_item(Button(label="⏱ Change Interval", style=discord.ButtonStyle.primary, custom_id=f"edit_interval_{account_name}"))
-        self.add_item(Button(label="⏳ Change Delay", style=discord.ButtonStyle.primary, custom_id=f"edit_delay_{account_name}"))
+        self.add_item(Button(label="📝 Message", style=discord.ButtonStyle.primary, custom_id=f"edit_msg_{account_name}"))
+        self.add_item(Button(label="📋 Channels", style=discord.ButtonStyle.primary, custom_id=f"edit_channels_{account_name}"))
+        self.add_item(Button(label="⏱ Interval", style=discord.ButtonStyle.primary, custom_id=f"edit_interval_{account_name}"))
+        self.add_item(Button(label="⏳ Delay", style=discord.ButtonStyle.primary, custom_id=f"edit_delay_{account_name}"))
         self.add_item(Button(label="🔙 Back", style=discord.ButtonStyle.secondary, custom_id=f"back_account_{account_name}"))
 
 # =============================================================
@@ -569,28 +568,24 @@ def create_panel_embed():
     total_failed = bot_data.get('total_failed', 0)
     total_channels = sum(len(acc.get('channels', [])) for acc in bot_data.get('accounts', {}).values())
     
-    # License Info
     embed.add_field(
         name="📜 License Info",
         value=f"**Status:** ███████ Active\n**Expires:** ∞",
         inline=True
     )
     
-    # Account Insights
     embed.add_field(
         name="📊 Account Insights",
         value=f"**Slots:** {total_accounts}/10\n**Active:** {running}\n**Inactive:** {total_accounts - running}",
         inline=True
     )
     
-    # Stats
     embed.add_field(
         name="📈 Statistics",
         value=f"**Total Channels:** {total_channels}\n**Messages Sent:** {total_sent} ✅\n**Failed:** {total_failed} ❌",
         inline=False
     )
     
-    # Account List
     if bot_data.get('accounts'):
         accounts_list = ""
         for name, acc in bot_data.get('accounts', {}).items():
@@ -607,7 +602,7 @@ def create_panel_embed():
     else:
         embed.add_field(
             name="📋 Active Accounts",
-            value="*No accounts found. Click `➕ Add Account` to get started.*",
+            value="*No accounts found. Click `➕ Add` to get started.*",
             inline=False
         )
     
@@ -897,7 +892,6 @@ async def on_interaction(interaction: discord.Interaction):
     
     custom_id = interaction.data['custom_id']
     
-    # -------- Panel Controls --------
     if custom_id == 'refresh_panel':
         embed = create_panel_embed()
         view = MainPanelView()
@@ -915,7 +909,6 @@ async def on_interaction(interaction: discord.Interaction):
         await interaction.response.edit_message(embed=embed, view=view)
         return
     
-    # -------- Account Controls --------
     if custom_id.startswith('start_'):
         account_name = custom_id.replace('start_', '')
         if account_name in bot_data['accounts']:
@@ -976,7 +969,6 @@ async def on_interaction(interaction: discord.Interaction):
             await interaction.response.edit_message(embed=embed)
         return
     
-    # -------- Edit Controls --------
     if custom_id.startswith('edit_msg_'):
         account_name = custom_id.replace('edit_msg_', '')
         embed = discord.Embed(
@@ -1028,236 +1020,6 @@ async def on_interaction(interaction: discord.Interaction):
             view = AccountControlView(account_name)
             await interaction.response.edit_message(embed=embed, view=view)
         return
-
-# =============================================================
-# COMMANDS (SECONDARY METHOD)
-# =============================================================
-
-@bot.command(name='addaccount')
-async def add_account_cmd(ctx, account_name: str, *, token: str):
-    """Secondary: Add account via command."""
-    if account_name in bot_data['accounts']:
-        await ctx.send(f"❌ Account `{account_name}` already exists!")
-        return
-    
-    token = token.strip()
-    if token.startswith('"') and token.endswith('"'):
-        token = token[1:-1]
-    if token.startswith("'") and token.endswith("'"):
-        token = token[1:-1]
-    token = token.replace('"', '').replace("'", '').replace('`', '')
-    token = token.replace(' ', '')
-    
-    if len(token) < 10:
-        await ctx.send("❌ Invalid token!")
-        return
-    
-    await ctx.send("🔍 Testing token...")
-    valid, result = await test_token(token)
-    if not valid:
-        await ctx.send(f"❌ {result}")
-        return
-    
-    account_data = DEFAULT_ACCOUNT.copy()
-    account_data['token'] = token
-    bot_data['accounts'][account_name] = account_data
-    update_account(account_name, account_data)
-    save_data()
-    
-    embed = discord.Embed(
-        title="✅ Account Added!",
-        description=f"**Name:** `{account_name}`\n{result}\n\nUse `!panel` to view all accounts.",
-        color=discord.Color.green()
-    )
-    embed.set_footer(text="developed by @yathishyt ⚡ | F-Society")
-    await ctx.send(embed=embed)
-
-@bot.command(name='removeaccount')
-async def remove_account_cmd(ctx, account_name: str):
-    """Secondary: Remove account via command."""
-    if account_name not in bot_data['accounts']:
-        await ctx.send(f"❌ Account `{account_name}` not found!")
-        return
-    delete_account_data(account_name)
-    embed = discord.Embed(
-        title="🗑 Account Removed",
-        description=f"Account `{account_name}` has been removed.",
-        color=discord.Color.red()
-    )
-    embed.set_footer(text="developed by @yathishyt ⚡ | F-Society")
-    await ctx.send(embed=embed)
-
-@bot.command(name='start')
-async def start_account_cmd(ctx, account_name: str):
-    """Secondary: Start account via command."""
-    if account_name not in bot_data['accounts']:
-        await ctx.send(f"❌ Account `{account_name}` not found!")
-        return
-    account_data = bot_data['accounts'][account_name]
-    if not account_data.get('token'):
-        await ctx.send(f"❌ Account `{account_name}` has no token!")
-        return
-    if not account_data.get('channels'):
-        await ctx.send(f"❌ Account `{account_name}` has no channels!")
-        return
-    if not account_data.get('message'):
-        await ctx.send(f"❌ Account `{account_name}` has no message!")
-        return
-    account_data['is_running'] = True
-    update_account(account_name, account_data)
-    save_data()
-    embed = discord.Embed(
-        title="🚀 Account Started!",
-        description=f"**Account:** `{account_name}`",
-        color=discord.Color.green()
-    )
-    embed.set_footer(text="developed by @yathishyt ⚡ | F-Society")
-    await ctx.send(embed=embed)
-
-@bot.command(name='stop')
-async def stop_account_cmd(ctx, account_name: str):
-    """Secondary: Stop account via command."""
-    if account_name not in bot_data['accounts']:
-        await ctx.send(f"❌ Account `{account_name}` not found!")
-        return
-    account_data = bot_data['accounts'][account_name]
-    account_data['is_running'] = False
-    update_account(account_name, account_data)
-    save_data()
-    embed = discord.Embed(
-        title="🛑 Account Stopped!",
-        description=f"**Account:** `{account_name}`\n**Sent:** {account_data.get('sent_count', 0)}\n**Failed:** {account_data.get('failed_count', 0)}",
-        color=discord.Color.red()
-    )
-    embed.set_footer(text="developed by @yathishyt ⚡ | F-Society")
-    await ctx.send(embed=embed)
-
-@bot.command(name='setmessage')
-async def set_message_cmd(ctx, *, message: str = None):
-    """Secondary: Set message via command."""
-    account_name = bot_data.get('active_account')
-    if not account_name:
-        await ctx.send("❌ No active account! Use `!account <name>` first.")
-        return
-    if account_name not in bot_data['accounts']:
-        await ctx.send(f"❌ Account `{account_name}` not found!")
-        return
-    if message is None:
-        if ctx.message.attachments:
-            for attachment in ctx.message.attachments:
-                if attachment.filename.endswith('.txt'):
-                    content = await attachment.read()
-                    message = content.decode('utf-8')
-                    break
-        if not message:
-            await ctx.send("❌ Please provide a message or attach a `.txt` file!")
-            return
-    account_data = bot_data['accounts'][account_name]
-    account_data['message'] = message
-    update_account(account_name, account_data)
-    save_data()
-    embed = discord.Embed(
-        title="✅ Message Set!",
-        description=f"**Account:** `{account_name}`\n**Message:** ```\n{message[:200]}```",
-        color=discord.Color.green()
-    )
-    embed.set_footer(text="developed by @yathishyt ⚡ | F-Society")
-    await ctx.send(embed=embed)
-
-@bot.command(name='addchannel')
-async def add_channel_cmd(ctx, *, channel_ids: str):
-    """Secondary: Add channels via command."""
-    account_name = bot_data.get('active_account')
-    if not account_name:
-        await ctx.send("❌ No active account! Use `!account <name>` first.")
-        return
-    if account_name not in bot_data['accounts']:
-        await ctx.send(f"❌ Account `{account_name}` not found!")
-        return
-    channel_list = []
-    for separator in [',', ';', ' ']:
-        if separator in channel_ids:
-            channel_list = [c.strip() for c in channel_ids.split(separator) if c.strip()]
-            break
-    if not channel_list:
-        channel_list = [channel_ids.strip()]
-    account_data = bot_data['accounts'][account_name]
-    added = []
-    for cid in channel_list:
-        if cid.isdigit() and cid not in account_data.get('channels', []):
-            account_data['channels'].append(cid)
-            added.append(cid)
-    update_account(account_name, account_data)
-    save_data()
-    embed = discord.Embed(
-        title="✅ Channels Added!",
-        description=f"**Account:** `{account_name}`\n**Added:** `{', '.join(added)}`\n**Total Channels:** {len(account_data['channels'])}",
-        color=discord.Color.green()
-    )
-    embed.set_footer(text="developed by @yathishyt ⚡ | F-Society")
-    await ctx.send(embed=embed)
-
-@bot.command(name='setinterval')
-async def set_interval_cmd(ctx, minutes: int):
-    """Secondary: Set interval via command."""
-    account_name = bot_data.get('active_account')
-    if not account_name:
-        await ctx.send("❌ No active account! Use `!account <name>` first.")
-        return
-    if account_name not in bot_data['accounts']:
-        await ctx.send(f"❌ Account `{account_name}` not found!")
-        return
-    if minutes < 1 or minutes > 60:
-        await ctx.send("❌ Interval must be 1-60 minutes!")
-        return
-    account_data = bot_data['accounts'][account_name]
-    account_data['schedule_interval'] = minutes
-    update_account(account_name, account_data)
-    save_data()
-    embed = discord.Embed(
-        title="✅ Interval Set!",
-        description=f"**Account:** `{account_name}`\n**Interval:** Every {minutes} minute(s)",
-        color=discord.Color.green()
-    )
-    embed.set_footer(text="developed by @yathishyt ⚡ | F-Society")
-    await ctx.send(embed=embed)
-
-@bot.command(name='setdelay')
-async def set_delay_cmd(ctx, seconds: int):
-    """Secondary: Set delay via command."""
-    account_name = bot_data.get('active_account')
-    if not account_name:
-        await ctx.send("❌ No active account! Use `!account <name>` first.")
-        return
-    if account_name not in bot_data['accounts']:
-        await ctx.send(f"❌ Account `{account_name}` not found!")
-        return
-    if seconds < 5 or seconds > 300:
-        await ctx.send("❌ Delay must be 5-300 seconds!")
-        return
-    account_data = bot_data['accounts'][account_name]
-    account_data['message_delay'] = seconds
-    update_account(account_name, account_data)
-    save_data()
-    embed = discord.Embed(
-        title="✅ Delay Set!",
-        description=f"**Account:** `{account_name}`\n**Delay:** {seconds}s between messages",
-        color=discord.Color.green()
-    )
-    embed.set_footer(text="developed by @yathishyt ⚡ | F-Society")
-    await ctx.send(embed=embed)
-
-@bot.command(name='commands')
-async def show_commands(ctx):
-    """Show all commands."""
-    embed = discord.Embed(
-        title="🔻 F-Society Commands",
-        description="**🎯 Primary Method (Recommended):**\n`!panel` - Open the F-Society panel\n\n**⚡ Secondary Method (Commands):**\n`!addaccount <name> <token>` - Add account\n`!removeaccount <name>` - Remove account\n`!start <name>` - Start account\n`!stop <name>` - Stop account\n`!setmessage <msg>` - Set message\n`!addchannel <ids>` - Add channels\n`!setinterval <min>` - Set interval\n`!setdelay <sec>` - Set delay\n\n**ℹ️ Info:**\n`!account <name>` - View account details\n`!commands` - Show this menu",
-        color=discord.Color.from_rgb(0, 255, 200),
-        timestamp=datetime.datetime.now()
-    )
-    embed.set_footer(text="developed by @yathishyt ⚡ | F-Society")
-    await ctx.send(embed=embed)
 
 # =============================================================
 # ERROR HANDLING
