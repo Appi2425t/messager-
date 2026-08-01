@@ -3,8 +3,8 @@
 # DISCORD BOT - F-SOCIETY CONTROL PANEL
 # =============================================================
 # - Advanced Discord panel with buttons & modals
-# - Add Account via popup modal (fill in everything)
-# - Remove Account via button with confirmation
+# - Add Account via TWO modals (split due to Discord limit)
+# - Remove Account via modal with confirmation
 # - Clean, professional design
 # - Redis storage
 # =============================================================
@@ -278,11 +278,11 @@ rate_limited = {}
 rate_limit_until = {}
 
 # =============================================================
-# MODAL (POPUP) FOR ADDING ACCOUNT
+# MODAL 1: BASIC INFO (Name + Token + Channels)
 # =============================================================
 
-class AddAccountModal(Modal, title='F-Society | Add Account'):
-    """Advanced modal popup for adding a new account."""
+class AddAccountModal1(Modal, title='F-Society | Add Account (1/2)'):
+    """First modal for adding account - Basic Info."""
     
     account_name = TextInput(
         label='⚡ Account Name',
@@ -307,6 +307,29 @@ class AddAccountModal(Modal, title='F-Society | Add Account'):
         max_length=500,
         style=discord.TextStyle.paragraph
     )
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        # Store data and open second modal
+        self.interaction = interaction
+        modal2 = AddAccountModal2(
+            account_name=self.account_name.value,
+            token=self.token.value,
+            channels=self.channel_ids.value
+        )
+        await interaction.response.send_modal(modal2)
+
+# =============================================================
+# MODAL 2: MESSAGE + SETTINGS (Message + Delay + Interval)
+# =============================================================
+
+class AddAccountModal2(Modal, title='F-Society | Add Account (2/2)'):
+    """Second modal for adding account - Message + Settings."""
+    
+    def __init__(self, account_name: str, token: str, channels: str):
+        super().__init__()
+        self.account_name_value = account_name
+        self.token_value = token
+        self.channels_value = channels
     
     message = TextInput(
         label='📝 Message to Send',
@@ -333,13 +356,11 @@ class AddAccountModal(Modal, title='F-Society | Add Account'):
     )
     
     async def on_submit(self, interaction: discord.Interaction):
-        """Handle modal submission."""
         global bot_data
         
-        # Get values
-        name = self.account_name.value.strip()
-        token = self.token.value.strip()
-        channels_raw = self.channel_ids.value.strip()
+        name = self.account_name_value.strip()
+        token = self.token_value.strip()
+        channels_raw = self.channels_value.strip()
         message = self.message.value.strip()
         
         # Parse delay and interval
@@ -884,7 +905,7 @@ async def on_interaction(interaction: discord.Interaction):
         return
     
     if custom_id == 'add_account_modal':
-        modal = AddAccountModal()
+        modal = AddAccountModal1()
         await interaction.response.send_modal(modal)
         return
     
