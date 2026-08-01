@@ -2,9 +2,12 @@
 # =============================================================
 # DISCORD BOT - SIMULTANEOUS MULTI-ACCOUNT MESSENGER (REDIS)
 # =============================================================
-# - FIXED: Rate limiting handling with proper delays
-# - FIXED: Redis NoneType error
-# - FIXED: Message sending with retry backoff
+# - 30 SECOND DELAY between messages to avoid rate limits
+# - ALL accounts send messages at the SAME TIME
+# - Each account has independent channels/message/schedule
+# - Redis database for persistent storage
+# - Support for long messages via .txt file upload
+# - Professional panel replies with developer credit
 # =============================================================
 
 import discord
@@ -31,14 +34,11 @@ except ImportError:
 # =============================================================
 
 class RedisManager:
-    """Manages Redis database connection and data persistence."""
-    
     def __init__(self):
         self.client = None
         self.connected = False
         
     def connect(self):
-        """Connect to Redis using Railway environment variables."""
         try:
             redis_url = os.environ.get('REDIS_URL', '')
             
@@ -82,7 +82,6 @@ class RedisManager:
         if not self.connected:
             return False
         try:
-            # Skip None values
             if value is None:
                 return False
             if isinstance(value, (dict, list)):
@@ -116,7 +115,6 @@ class RedisManager:
         if not self.connected:
             return False
         try:
-            # Skip None values
             if value is None:
                 return False
             if isinstance(value, (dict, list)):
@@ -179,16 +177,6 @@ class RedisManager:
             print(f"⚠️ Redis lrange error: {e}")
             return []
     
-    def ltrim(self, name: str, start: int, end: int):
-        if not self.connected:
-            return False
-        try:
-            self.client.ltrim(name, start, end)
-            return True
-        except Exception as e:
-            print(f"⚠️ Redis ltrim error: {e}")
-            return False
-    
     def incr(self, key: str):
         if not self.connected:
             return 0
@@ -211,7 +199,6 @@ KEY_TOTAL_FAILED = 'bot:total_failed'
 KEY_ACCOUNT_PREFIX = 'bot:account:'
 
 def load_data():
-    """Load data from Redis with proper None handling."""
     try:
         if not redis_manager.connected:
             return {'accounts': {}, 'active_account': None, 'total_sent': 0, 'total_failed': 0}
@@ -250,7 +237,6 @@ def load_data():
         return {'accounts': {}, 'active_account': None, 'total_sent': 0, 'total_failed': 0}
 
 def save_data(data):
-    """Save data to Redis with proper None handling."""
     try:
         if not redis_manager.connected:
             return False
@@ -280,7 +266,6 @@ def save_data(data):
         return False
 
 def update_account(account_name: str, account_data: dict):
-    """Update a single account in Redis."""
     try:
         if not redis_manager.connected:
             return False
@@ -305,7 +290,6 @@ def update_account(account_name: str, account_data: dict):
         return False
 
 def delete_account(account_name: str):
-    """Delete an account from Redis."""
     try:
         if not redis_manager.connected:
             return False
@@ -358,6 +342,11 @@ else:
 
 BOT_TOKEN = os.environ.get('BOT_TOKEN', '')
 
+# =============================================================
+# DEFAULT DELAY: 30 SECONDS
+# =============================================================
+DEFAULT_DELAY = 30  # <-- 30 second delay between messages
+
 DEFAULT_ACCOUNT = {
     'token': None,
     'channels': [],
@@ -368,7 +357,8 @@ DEFAULT_ACCOUNT = {
     'failed_count': 0,
     'total_rounds': 0,
     'failed_channel_id': None,
-    'failed_logs': []
+    'failed_logs': [],
+    'message_delay': DEFAULT_DELAY  # <-- Per-account delay setting
 }
 
 # =============================================================
@@ -420,7 +410,7 @@ def create_panel(title: str, content: str, color=None, success=None) -> discord.
         color=color,
         timestamp=datetime.datetime.now()
     )
-    embed.set_footer(text="developed by @yathishyt ⚡ | Redis Mode")
+    embed.set_footer(text="developed by @yathishyt ⚡ | 30s Delay Mode")
     return embed
 
 async def send_panel(ctx, title: str, content: str, success=None, color=None):
@@ -466,14 +456,14 @@ async def test_token(token: str):
                         if response2.status == 200:
                             data = await response2.json()
                             return True, f"✅ Bot: {data.get('username')}"
-                    return False, "❌ Invalid token"
+                    return False, "❌ Invalid token - please get a new one from Chrome"
                 else:
                     return False, f"❌ HTTP {response.status}"
     except Exception as e:
         return False, f"❌ Error: {str(e)}"
 
 # =============================================================
-# SEND MESSAGE FUNCTIONS (FIXED)
+# SEND MESSAGE FUNCTIONS (30 SECOND DELAY)
 # =============================================================
 
 async def send_single_message(channel_id: str, message: str, token: str, account_name: str) -> tuple:
@@ -487,46 +477,56 @@ async def send_single_message(channel_id: str, message: str, token: str, account
     
     if rate_limited.get(account_name, False) and time.time() < rate_limit_until.get(account_name, 0):
         wait_time = rate_limit_until[account_name] - time.time()
-        print(f"⏳ Rate limited, waiting {wait_time:.2f}s...")
-        await asyncio.sleep(wait_time + 0.5)
+        print(f"⏳ [{account_name}] Rate limited, waiting {wait_time:.2f}s...")
+        await asyncio.sleep(wait_time + 1)
         rate_limited[account_name] = False
     
     url = f"https://discord.com/api/v9/channels/{channel_id}/messages"
     headers = {'Authorization': token, 'Content-Type': 'application/json'}
     payload = {'content': message, 'tts': False}
     
-    # Random small delay to avoid rate limits
-    await asyncio.sleep(random.uniform(0.2, 0.5))
-    
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, headers=headers, json=payload, timeout=15) as response:
+            async with session.post(url, headers=headers, json=payload, timeout=30) as response:
                 if response.status == 200:
+                    return True, None
+                elif response.status == 201:
                     return True, None
                 elif response.status == 429:
                     data = await response.json()
-                    retry_after = data.get('retry_after', 5)
-                    print(f"⚠️ Rate limited! Waiting {retry_after:.2f}s...")
+                    retry_after = data.get('retry_after', 30)
+                    print(f"⚠️ [{account_name}] Rate limited! Waiting {retry_after:.2f}s...")
                     rate_limited[account_name] = True
-                    rate_limit_until[account_name] = time.time() + retry_after + 1
-                    await asyncio.sleep(retry_after + 1)
+                    rate_limit_until[account_name] = time.time() + retry_after + 2
+                    await asyncio.sleep(retry_after + 2)
                     return await send_single_message(channel_id, message, token, account_name)
+                elif response.status == 401:
+                    print(f"❌ [{account_name}] TOKEN EXPIRED! Channel: {channel_id}")
+                    await log_failed_message(account_name, channel_id, "TOKEN EXPIRED - Get new token from Chrome")
+                    account_data = data['accounts'].get(account_name)
+                    if account_data:
+                        account_data['is_running'] = False
+                        update_account(account_name, account_data)
+                        save_data(data)
+                    return False, "TOKEN EXPIRED"
                 elif response.status == 403:
-                    print(f"❌ No permission to send in channel {channel_id}")
+                    print(f"❌ [{account_name}] No permission in {channel_id}")
+                    await log_failed_message(account_name, channel_id, "No permission to send")
                     return False, "No permission"
                 elif response.status == 400:
-                    print(f"❌ Bad request - message too long?")
+                    print(f"❌ [{account_name}] Bad request for {channel_id}")
+                    await log_failed_message(account_name, channel_id, "Bad request - message too long?")
                     return False, "Bad request"
                 else:
-                    print(f"❌ Failed: HTTP {response.status}")
+                    print(f"❌ [{account_name}] Failed: HTTP {response.status} on {channel_id}")
                     await log_failed_message(account_name, channel_id, f"HTTP {response.status}")
                     return False, f"HTTP {response.status}"
     except asyncio.TimeoutError:
-        print(f"⏳ Timeout for channel {channel_id}")
+        print(f"⏳ [{account_name}] Timeout on {channel_id}")
         await log_failed_message(account_name, channel_id, "Timeout")
         return False, "Timeout"
     except Exception as e:
-        print(f"❌ Error: {str(e)}")
+        print(f"❌ [{account_name}] Error on {channel_id}: {str(e)}")
         await log_failed_message(account_name, channel_id, str(e))
         return False, str(e)
 
@@ -544,29 +544,29 @@ async def send_round_for_account(account_name: str) -> dict:
     if not token or not channels or not message:
         return {'sent': 0, 'failed': 0, 'account': account_name}
     
-    # Add delay between channels to avoid rate limits
-    delay_between = max(0.5, 1.5 - (len(channels) * 0.05))
-    delay_between = max(0.3, delay_between)
+    # Get per-account delay (default 30 seconds)
+    message_delay = account_data.get('message_delay', DEFAULT_DELAY)
     
-    print(f"📨 Sending to {len(channels)} channels for {account_name} (delay: {delay_between:.2f}s)...")
+    print(f"📨 [{account_name}] Sending to {len(channels)} channels (delay: {message_delay}s)...")
     
     sent = 0
     failed = 0
     
-    for channel_id in channels:
-        print(f"  📤 {account_name} → {channel_id}...")
+    for index, channel_id in enumerate(channels, 1):
+        print(f"  📤 [{account_name}] {channel_id}...")
         success, error = await send_single_message(channel_id, message, token, account_name)
         
         if success:
             sent += 1
-            print(f"    ✅ Sent!")
+            print(f"    ✅ [{account_name}] Sent!")
         else:
             failed += 1
-            print(f"    ❌ Failed: {error}")
+            print(f"    ❌ [{account_name}] Failed: {error}")
         
-        # Delay between channel sends
-        if len(channels) > 1:
-            await asyncio.sleep(delay_between)
+        # WAIT 30 SECONDS BETWEEN MESSAGES (unless it's the last one)
+        if index < len(channels):
+            print(f"  ⏳ [{account_name}] Waiting {message_delay}s before next message...")
+            await asyncio.sleep(message_delay)
     
     account_data['sent_count'] = account_data.get('sent_count', 0) + sent
     account_data['failed_count'] = account_data.get('failed_count', 0) + failed
@@ -577,7 +577,7 @@ async def send_round_for_account(account_name: str) -> dict:
     update_account(account_name, account_data)
     save_data(data)
     
-    print(f"  📊 {account_name}: ✅ {sent} sent | ❌ {failed} failed")
+    print(f"  📊 [{account_name}] Round complete: ✅ {sent} sent | ❌ {failed} failed")
     
     return {'sent': sent, 'failed': failed, 'account': account_name}
 
@@ -591,6 +591,7 @@ async def send_round_for_all_accounts():
         return
     
     print(f"\n🔄 Sending round for {len(running_accounts)} accounts simultaneously...")
+    print(f"⏳ Each account will have {DEFAULT_DELAY}s delay between messages")
     
     tasks = []
     for account_name in running_accounts:
@@ -639,7 +640,7 @@ async def log_failed_message(account_name: str, channel_id: str, reason: str):
             color=discord.Color.red(),
             timestamp=datetime.datetime.now()
         )
-        embed.set_footer(text="developed by @yathishyt ⚡ | Redis Mode")
+        embed.set_footer(text="developed by @yathishyt ⚡ | 30s Delay Mode")
         await failed_channel.send(embed=embed)
         
     except Exception as e:
@@ -671,7 +672,7 @@ async def scheduled_send_task():
             await asyncio.sleep(10)
 
 # =============================================================
-# BOT COMMANDS (Keep existing commands)
+# BOT COMMANDS
 # =============================================================
 
 global_send_task = None
@@ -683,14 +684,40 @@ async def on_ready():
     print(f'✅ Bot online: {bot.user.name}')
     print(f'📡 Connected to {len(bot.guilds)} servers')
     print(f'🗄️ Redis: {"Connected" if redis_manager.connected else "Disconnected (using JSON fallback)"}')
+    print(f'⏳ Default message delay: {DEFAULT_DELAY} seconds')
     
     if global_send_task is None or global_send_task.done():
         global_send_task = asyncio.create_task(scheduled_send_task())
         print("✅ Global send task started")
 
-# =============================================================
-# ALL COMMANDS (Same as before - keep them)
-# =============================================================
+# -------- NEW COMMAND: SET DELAY --------
+
+@bot.command(name='setdelay')
+async def set_delay(ctx, seconds: int):
+    """Set delay between messages for active account (in seconds)."""
+    account_data, error = get_active_account(ctx)
+    if not account_data:
+        await send_panel(ctx, "SET DELAY", error, success=False)
+        return
+    
+    if seconds < 5:
+        await send_panel(ctx, "SET DELAY", "❌ Delay must be at least 5 seconds!", success=False)
+        return
+    
+    if seconds > 300:
+        await send_panel(ctx, "SET DELAY", "❌ Delay cannot exceed 300 seconds (5 minutes)!", success=False)
+        return
+    
+    account_data['message_delay'] = seconds
+    update_account(data['active_account'], account_data)
+    save_data(data)
+    
+    await send_panel(ctx, "SET DELAY", 
+        f"✅ Delay set for `{data['active_account']}`: **{seconds} seconds** between messages!\n"
+        f"⏳ This will help avoid rate limits.", 
+        success=True)
+
+# -------- EXISTING COMMANDS (with updated descriptions) --------
 
 @bot.command(name='addaccount')
 async def add_account(ctx, account_name: str, *, token: str):
@@ -714,6 +741,7 @@ async def add_account(ctx, account_name: str, *, token: str):
     
     account_data = DEFAULT_ACCOUNT.copy()
     account_data['token'] = token
+    account_data['message_delay'] = DEFAULT_DELAY  # 30 seconds default
     data['accounts'][account_name] = account_data
     data['active_account'] = account_name
     
@@ -722,7 +750,8 @@ async def add_account(ctx, account_name: str, *, token: str):
     
     await send_panel(ctx, "ADD ACCOUNT", 
         f"✅ **Account Added!**\n📛 Name: `{account_name}`\n{result}\n\n"
-        f"🗄️ Data stored in Redis", 
+        f"⏳ Default delay: **{DEFAULT_DELAY}s** between messages\n"
+        f"Use `!setdelay <seconds>` to change", 
         success=True)
 
 @bot.command(name='accounts')
@@ -737,9 +766,11 @@ async def list_accounts(ctx):
     for name, acc in accounts.items():
         status = "🟢 Running" if acc.get('is_running', False) else "🔴 Stopped"
         channels = len(acc.get('channels', []))
-        content += f"• **{name}**\n  └ Status: {status} | Channels: {channels}\n\n"
+        delay = acc.get('message_delay', DEFAULT_DELAY)
+        content += f"• **{name}**\n  └ Status: {status} | Channels: {channels} | Delay: {delay}s\n\n"
     
     content += f"\n🗄️ **Redis Storage:** {'Connected ✅' if redis_manager.connected else 'Disconnected ❌'}"
+    content += f"\n⏳ **Default Delay:** {DEFAULT_DELAY}s between messages"
     await send_panel(ctx, "ACCOUNTS", content, success=True)
 
 @bot.command(name='account')
@@ -755,15 +786,24 @@ async def select_account(ctx, account_name: str):
     
     account_data = data['accounts'][account_name]
     status = "🟢 Running" if account_data.get('is_running', False) else "🔴 Stopped"
+    delay = account_data.get('message_delay', DEFAULT_DELAY)
     
     content = f"""**Selected Account:** `{account_name}`
 Status: {status}
 Channels: {len(account_data.get('channels', []))}
 Interval: Every {account_data.get('schedule_interval', 1)} minute(s)
+Delay: {delay}s between messages
 Sent: {account_data.get('sent_count', 0)}
 Failed: {account_data.get('failed_count', 0)}
 
 **🗄️ Redis Storage:** {'Connected ✅' if redis_manager.connected else 'Disconnected ❌'}
+
+**Commands:**
+`!addchannel <id1,id2,id3>` - Add multiple channels
+`!setmessage <msg>` - Set message (or attach .txt)
+`!setdelay <seconds>` - Set delay between messages
+`!start` - Start this account
+`!stop` - Stop this account
 """
     await send_panel(ctx, "ACCOUNT", content, success=True)
 
@@ -842,7 +882,9 @@ async def add_channel(ctx, *, channel_ids: str):
     if invalid:
         response_parts.append(f"❌ Invalid: `{', '.join(invalid)}`")
     
+    delay = account_data.get('message_delay', DEFAULT_DELAY)
     response_parts.append(f"📊 Total channels: **{len(account_data['channels'])}**")
+    response_parts.append(f"⏳ Delay: **{delay}s** between messages")
     
     await send_panel(ctx, "ADD CHANNEL", "\n".join(response_parts), success=True if added else False)
 
@@ -908,7 +950,8 @@ async def list_channels(ctx):
         except:
             channel_list.append(f"• `{cid}`")
     
-    content = f"**Account:** `{data['active_account']}`\n**Total:** {len(channels)}\n\n" + "\n".join(channel_list)
+    delay = account_data.get('message_delay', DEFAULT_DELAY)
+    content = f"**Account:** `{data['active_account']}`\n**Total:** {len(channels)}\n⏳ **Delay:** {delay}s\n\n" + "\n".join(channel_list)
     await send_panel(ctx, "LIST CHANNELS", content, success=True)
 
 @bot.command(name='setmessage')
@@ -955,7 +998,8 @@ async def set_message(ctx, *, message: str = None):
     await send_panel(ctx, "SET MESSAGE", 
         f"✅ Message set for `{data['active_account']}`!\n\n"
         f"```\n{preview}\n```\n\n"
-        f"📊 **Length:** {len(message)} characters", 
+        f"📊 **Length:** {len(message)} characters\n"
+        f"⏳ Delay: {account_data.get('message_delay', DEFAULT_DELAY)}s between messages", 
         success=True)
 
 @bot.command(name='setinterval')
@@ -1056,11 +1100,13 @@ async def start_account(ctx):
     save_data(data)
     
     running = [name for name, acc in data['accounts'].items() if acc.get('is_running', False)]
+    delay = account_data.get('message_delay', DEFAULT_DELAY)
     
     await send_panel(ctx, "START", 
         f"🚀 **Started `{account_name}`!**\n"
         f"📊 Channels: {len(account_data['channels'])}\n"
-        f"⏱️ Interval: Every {account_data['schedule_interval']} minute(s)\n\n"
+        f"⏱️ Interval: Every {account_data['schedule_interval']} minute(s)\n"
+        f"⏳ Delay: **{delay}s** between messages\n\n"
         f"🔄 **Running accounts: {len(running)}**", 
         success=True)
 
@@ -1098,7 +1144,7 @@ async def send_now(ctx):
         await send_panel(ctx, "SEND NOW", "❌ No accounts running!", success=False)
         return
     
-    await send_panel(ctx, "SEND NOW", f"📨 Sending for **{len(running)} accounts**...", color=discord.Color.blue())
+    await send_panel(ctx, "SEND NOW", f"📨 Sending for **{len(running)} accounts**...\n⏳ {DEFAULT_DELAY}s delay between messages", color=discord.Color.blue())
     
     results = await send_round_for_all_accounts()
     
@@ -1108,7 +1154,8 @@ async def send_now(ctx):
     await send_panel(ctx, "SEND NOW", 
         f"✅ Done!\n\n"
         f"✅ Total Sent: **{total_sent}**\n"
-        f"❌ Total Failed: **{total_failed}**", 
+        f"❌ Total Failed: **{total_failed}**\n"
+        f"⏳ Delay used: **{DEFAULT_DELAY}s** between messages", 
         success=True)
 
 @bot.command(name='startall')
@@ -1137,7 +1184,8 @@ async def start_all_accounts(ctx):
     
     await send_panel(ctx, "START ALL", 
         f"🚀 **Started {started} accounts!**\n"
-        f"📊 Total Running: **{len(running)}**", 
+        f"📊 Total Running: **{len(running)}**\n"
+        f"⏳ Delay: **{DEFAULT_DELAY}s** between messages", 
         success=True)
 
 @bot.command(name='stopall')
@@ -1167,12 +1215,14 @@ async def show_status(ctx):
     
     running = account_data.get('is_running', False)
     all_running = [name for name, acc in data['accounts'].items() if acc.get('is_running', False)]
+    delay = account_data.get('message_delay', DEFAULT_DELAY)
     
     content = f"""**Account:** `{account_name}`
 {"🟢" if running else "🔴"} Status: **{"Running" if running else "Stopped"}**
 👤 Token: `{account_data.get('token', 'Not set')[:20]}...`
 📋 Channels: {len(account_data.get('channels', []))}
 ⏱️ Interval: Every {account_data.get('schedule_interval', 1)} minute(s)
+⏳ Delay: **{delay}s** between messages
 ✅ Sent: {account_data.get('sent_count', 0)}
 ❌ Failed: {account_data.get('failed_count', 0)}
 📊 Rounds: {account_data.get('total_rounds', 0)}
@@ -1210,7 +1260,7 @@ async def clear_settings(ctx):
 @bot.command(name='commands')
 async def show_commands(ctx):
     content = """
-**📋 Multi-Account Commands (Redis Mode)**
+**📋 Multi-Account Commands (30s Delay Mode)**
 
 **Account Management:**
 `!addaccount <name> <token>` - Add new account
@@ -1224,6 +1274,7 @@ async def show_commands(ctx):
 `!listchannels` - List channels
 `!setmessage <msg>` - Set message (or attach .txt)
 `!setinterval <min>` - Set interval (1-60 min)
+`!setdelay <seconds>` - Set delay between messages (5-300s)
 `!failed <channel_id>` - Set failed logs channel
 `!failedlogs` - Show failed logs
 
@@ -1239,7 +1290,8 @@ async def show_commands(ctx):
 **Other:**
 `!commands` - Show this menu
 
-**⚡ All running accounts send simultaneously!**
+**⚡ ALL running accounts send simultaneously!**
+**⏳ Default delay: 30 seconds between messages**
 **🗄️ All data stored in Redis**"""
     await send_panel(ctx, "COMMANDS", content, color=discord.Color.blue())
 
@@ -1261,8 +1313,9 @@ async def on_command_error(ctx, error):
 # =============================================================
 
 def main():
-    print("🚀 Starting Simultaneous Multi-Account Bot (Redis)...")
+    print("🚀 Starting Multi-Account Bot (30s Delay Mode)...")
     print(f"🗄️ Redis: {'Connected' if redis_manager.connected else 'Disconnected (JSON fallback)'}")
+    print(f"⏳ Default delay: {DEFAULT_DELAY} seconds between messages")
     
     if not BOT_TOKEN:
         print("❌ No BOT_TOKEN found! Set in Railway Variables")
