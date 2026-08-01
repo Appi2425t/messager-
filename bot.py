@@ -2,12 +2,10 @@
 # =============================================================
 # DISCORD BOT - SIMULTANEOUS MULTI-ACCOUNT MESSENGER (REDIS)
 # =============================================================
-# - 30 SECOND DELAY between messages to avoid rate limits
-# - ALL accounts send messages at the SAME TIME
-# - Each account has independent channels/message/schedule
-# - Redis database for persistent storage
-# - Support for long messages via .txt file upload
-# - Professional panel replies with developer credit
+# - 30 SECOND DELAY between messages
+# - FIXED: data variable scope issue
+# - FIXED: Token expired handling
+# - ALL accounts send simultaneously
 # =============================================================
 
 import discord
@@ -65,7 +63,6 @@ class RedisManager:
             
         except Exception as e:
             print(f"⚠️ Redis connection failed: {e}")
-            print("💡 Falling back to JSON file storage...")
             self.connected = False
             return False
     
@@ -75,7 +72,6 @@ class RedisManager:
         try:
             return self.client.get(key)
         except Exception as e:
-            print(f"⚠️ Redis get error: {e}")
             return None
     
     def set(self, key: str, value):
@@ -99,7 +95,6 @@ class RedisManager:
             self.client.delete(key)
             return True
         except Exception as e:
-            print(f"⚠️ Redis delete error: {e}")
             return False
     
     def keys(self, pattern: str = '*'):
@@ -108,7 +103,6 @@ class RedisManager:
         try:
             return self.client.keys(pattern)
         except Exception as e:
-            print(f"⚠️ Redis keys error: {e}")
             return []
     
     def hset(self, name: str, key: str, value):
@@ -131,7 +125,6 @@ class RedisManager:
         try:
             return self.client.hget(name, key)
         except Exception as e:
-            print(f"⚠️ Redis hget error: {e}")
             return None
     
     def hgetall(self, name: str):
@@ -151,31 +144,7 @@ class RedisManager:
             self.client.hdel(name, key)
             return True
         except Exception as e:
-            print(f"⚠️ Redis hdel error: {e}")
             return False
-    
-    def lpush(self, name: str, value):
-        if not self.connected:
-            return False
-        try:
-            if value is None:
-                return False
-            if isinstance(value, (dict, list)):
-                value = json.dumps(value)
-            self.client.lpush(name, value)
-            return True
-        except Exception as e:
-            print(f"⚠️ Redis lpush error: {e}")
-            return False
-    
-    def lrange(self, name: str, start: int = 0, end: int = -1):
-        if not self.connected:
-            return []
-        try:
-            return self.client.lrange(name, start, end)
-        except Exception as e:
-            print(f"⚠️ Redis lrange error: {e}")
-            return []
     
     def incr(self, key: str):
         if not self.connected:
@@ -183,13 +152,24 @@ class RedisManager:
         try:
             return self.client.incr(key)
         except Exception as e:
-            print(f"⚠️ Redis incr error: {e}")
             return 0
 
 redis_manager = RedisManager()
 
 # =============================================================
-# DATA MANAGEMENT WITH REDIS
+# GLOBAL DATA (Accessible everywhere)
+# =============================================================
+
+# This is the global data variable that all functions can access
+bot_data = {
+    'accounts': {},
+    'active_account': None,
+    'total_sent': 0,
+    'total_failed': 0
+}
+
+# =============================================================
+# DATA MANAGEMENT
 # =============================================================
 
 KEY_ACCOUNTS = 'bot:accounts'
@@ -199,9 +179,13 @@ KEY_TOTAL_FAILED = 'bot:total_failed'
 KEY_ACCOUNT_PREFIX = 'bot:account:'
 
 def load_data():
+    """Load data from Redis into global bot_data."""
+    global bot_data
+    
     try:
         if not redis_manager.connected:
-            return {'accounts': {}, 'active_account': None, 'total_sent': 0, 'total_failed': 0}
+            bot_data = {'accounts': {}, 'active_account': None, 'total_sent': 0, 'total_failed': 0}
+            return bot_data
         
         accounts_raw = redis_manager.get(KEY_ACCOUNTS)
         accounts = json.loads(accounts_raw) if accounts_raw else {}
@@ -217,7 +201,7 @@ def load_data():
                     try:
                         if key in ['channels', 'failed_logs']:
                             account_data[key] = json.loads(value) if value else []
-                        elif key in ['sent_count', 'failed_count', 'total_rounds', 'schedule_interval']:
+                        elif key in ['sent_count', 'failed_count', 'total_rounds', 'schedule_interval', 'message_delay']:
                             account_data[key] = int(value) if value else 0
                         elif key == 'is_running':
                             account_data[key] = value == 'True'
@@ -225,27 +209,33 @@ def load_data():
                         pass
                 accounts[account_name] = account_data
         
-        return {
+        bot_data = {
             'accounts': accounts,
             'active_account': active_account,
             'total_sent': total_sent,
             'total_failed': total_failed
         }
         
+        return bot_data
+        
     except Exception as e:
         print(f"⚠️ Error loading data from Redis: {e}")
-        return {'accounts': {}, 'active_account': None, 'total_sent': 0, 'total_failed': 0}
+        bot_data = {'accounts': {}, 'active_account': None, 'total_sent': 0, 'total_failed': 0}
+        return bot_data
 
-def save_data(data):
+def save_data():
+    """Save global bot_data to Redis."""
+    global bot_data
+    
     try:
         if not redis_manager.connected:
             return False
         
-        accounts = data.get('accounts', {})
+        accounts = bot_data.get('accounts', {})
         redis_manager.set(KEY_ACCOUNTS, json.dumps(accounts))
-        redis_manager.set(KEY_ACTIVE_ACCOUNT, data.get('active_account', '') or '')
-        redis_manager.set(KEY_TOTAL_SENT, data.get('total_sent', 0))
-        redis_manager.set(KEY_TOTAL_FAILED, data.get('total_failed', 0))
+        redis_manager.set(KEY_ACTIVE_ACCOUNT, bot_data.get('active_account', '') or '')
+        redis_manager.set(KEY_TOTAL_SENT, bot_data.get('total_sent', 0))
+        redis_manager.set(KEY_TOTAL_FAILED, bot_data.get('total_failed', 0))
         
         for account_name, account_data in accounts.items():
             if account_data:
@@ -266,6 +256,9 @@ def save_data(data):
         return False
 
 def update_account(account_name: str, account_data: dict):
+    """Update a single account in Redis and sync global data."""
+    global bot_data
+    
     try:
         if not redis_manager.connected:
             return False
@@ -273,6 +266,11 @@ def update_account(account_name: str, account_data: dict):
         if not account_data:
             return False
         
+        # Update global data
+        if account_name in bot_data['accounts']:
+            bot_data['accounts'][account_name] = account_data
+        
+        # Save to Redis
         hash_key = f"{KEY_ACCOUNT_PREFIX}{account_name}"
         for field, value in account_data.items():
             if value is not None:
@@ -290,6 +288,9 @@ def update_account(account_name: str, account_data: dict):
         return False
 
 def delete_account(account_name: str):
+    """Delete an account from Redis and global data."""
+    global bot_data
+    
     try:
         if not redis_manager.connected:
             return False
@@ -302,6 +303,10 @@ def delete_account(account_name: str):
         if account_name in accounts:
             del accounts[account_name]
             redis_manager.set(KEY_ACCOUNTS, json.dumps(accounts))
+        
+        # Remove from global data
+        if account_name in bot_data['accounts']:
+            del bot_data['accounts'][account_name]
         
         return True
         
@@ -341,11 +346,7 @@ else:
 # =============================================================
 
 BOT_TOKEN = os.environ.get('BOT_TOKEN', '')
-
-# =============================================================
-# DEFAULT DELAY: 30 SECONDS
-# =============================================================
-DEFAULT_DELAY = 30  # <-- 30 second delay between messages
+DEFAULT_DELAY = 30
 
 DEFAULT_ACCOUNT = {
     'token': None,
@@ -358,7 +359,7 @@ DEFAULT_ACCOUNT = {
     'total_rounds': 0,
     'failed_channel_id': None,
     'failed_logs': [],
-    'message_delay': DEFAULT_DELAY  # <-- Per-account delay setting
+    'message_delay': DEFAULT_DELAY
 }
 
 # =============================================================
@@ -375,18 +376,7 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 redis_manager.connect()
 
 # Load initial data
-data = load_data()
-
-if 'accounts' not in data:
-    data['accounts'] = {}
-if 'active_account' not in data:
-    data['active_account'] = None
-if 'total_sent' not in data:
-    data['total_sent'] = 0
-if 'total_failed' not in data:
-    data['total_failed'] = 0
-
-save_data(data)
+load_data()
 
 sending_tasks = {}
 rate_limited = {}
@@ -451,22 +441,20 @@ async def test_token(token: str):
                     data = await response.json()
                     return True, f"✅ {data.get('username')}#{data.get('discriminator', '0')}"
                 elif response.status == 401:
-                    headers2 = {'Authorization': f'Bot {token}', 'Content-Type': 'application/json'}
-                    async with session.get(url, headers=headers2, timeout=10) as response2:
-                        if response2.status == 200:
-                            data = await response2.json()
-                            return True, f"✅ Bot: {data.get('username')}"
-                    return False, "❌ Invalid token - please get a new one from Chrome"
+                    return False, "❌ TOKEN EXPIRED - Get new one from Chrome"
                 else:
                     return False, f"❌ HTTP {response.status}"
     except Exception as e:
         return False, f"❌ Error: {str(e)}"
 
 # =============================================================
-# SEND MESSAGE FUNCTIONS (30 SECOND DELAY)
+# SEND MESSAGE FUNCTIONS (FIXED)
 # =============================================================
 
 async def send_single_message(channel_id: str, message: str, token: str, account_name: str) -> tuple:
+    """Send a single message to a channel."""
+    global bot_data
+    
     token = clean_token(token)
     if not token:
         return False, "Invalid token"
@@ -488,9 +476,7 @@ async def send_single_message(channel_id: str, message: str, token: str, account
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(url, headers=headers, json=payload, timeout=30) as response:
-                if response.status == 200:
-                    return True, None
-                elif response.status == 201:
+                if response.status == 200 or response.status == 201:
                     return True, None
                 elif response.status == 429:
                     data = await response.json()
@@ -503,11 +489,13 @@ async def send_single_message(channel_id: str, message: str, token: str, account
                 elif response.status == 401:
                     print(f"❌ [{account_name}] TOKEN EXPIRED! Channel: {channel_id}")
                     await log_failed_message(account_name, channel_id, "TOKEN EXPIRED - Get new token from Chrome")
-                    account_data = data['accounts'].get(account_name)
-                    if account_data:
-                        account_data['is_running'] = False
-                        update_account(account_name, account_data)
-                        save_data(data)
+                    
+                    # Stop the account
+                    if account_name in bot_data['accounts']:
+                        bot_data['accounts'][account_name]['is_running'] = False
+                        update_account(account_name, bot_data['accounts'][account_name])
+                        save_data()
+                    
                     return False, "TOKEN EXPIRED"
                 elif response.status == 403:
                     print(f"❌ [{account_name}] No permission in {channel_id}")
@@ -531,11 +519,13 @@ async def send_single_message(channel_id: str, message: str, token: str, account
         return False, str(e)
 
 async def send_round_for_account(account_name: str) -> dict:
-    global data
+    """Send one round for a single account."""
+    global bot_data
     
-    account_data = data['accounts'].get(account_name)
-    if not account_data:
+    if account_name not in bot_data['accounts']:
         return {'sent': 0, 'failed': 0, 'account': account_name}
+    
+    account_data = bot_data['accounts'][account_name]
     
     token = account_data.get('token')
     channels = account_data.get('channels', [])
@@ -544,7 +534,15 @@ async def send_round_for_account(account_name: str) -> dict:
     if not token or not channels or not message:
         return {'sent': 0, 'failed': 0, 'account': account_name}
     
-    # Get per-account delay (default 30 seconds)
+    # Check if token is expired before sending
+    test_valid, _ = await test_token(token)
+    if not test_valid:
+        print(f"❌ [{account_name}] Token expired! Stopping account.")
+        account_data['is_running'] = False
+        update_account(account_name, account_data)
+        save_data()
+        return {'sent': 0, 'failed': 0, 'account': account_name, 'error': 'Token expired'}
+    
     message_delay = account_data.get('message_delay', DEFAULT_DELAY)
     
     print(f"📨 [{account_name}] Sending to {len(channels)} channels (delay: {message_delay}s)...")
@@ -563,35 +561,37 @@ async def send_round_for_account(account_name: str) -> dict:
             failed += 1
             print(f"    ❌ [{account_name}] Failed: {error}")
         
-        # WAIT 30 SECONDS BETWEEN MESSAGES (unless it's the last one)
+        # Wait between messages (30 seconds default)
         if index < len(channels):
             print(f"  ⏳ [{account_name}] Waiting {message_delay}s before next message...")
             await asyncio.sleep(message_delay)
     
+    # Update stats
     account_data['sent_count'] = account_data.get('sent_count', 0) + sent
     account_data['failed_count'] = account_data.get('failed_count', 0) + failed
     account_data['total_rounds'] = account_data.get('total_rounds', 0) + 1
-    data['total_sent'] = data.get('total_sent', 0) + sent
-    data['total_failed'] = data.get('total_failed', 0) + failed
+    bot_data['total_sent'] = bot_data.get('total_sent', 0) + sent
+    bot_data['total_failed'] = bot_data.get('total_failed', 0) + failed
     
     update_account(account_name, account_data)
-    save_data(data)
+    save_data()
     
     print(f"  📊 [{account_name}] Round complete: ✅ {sent} sent | ❌ {failed} failed")
     
     return {'sent': sent, 'failed': failed, 'account': account_name}
 
 async def send_round_for_all_accounts():
-    global data
+    """Send one round for ALL running accounts simultaneously."""
+    global bot_data
     
-    accounts = data.get('accounts', {})
+    accounts = bot_data.get('accounts', {})
     running_accounts = [name for name, acc in accounts.items() if acc.get('is_running', False)]
     
     if not running_accounts:
         return
     
     print(f"\n🔄 Sending round for {len(running_accounts)} accounts simultaneously...")
-    print(f"⏳ Each account will have {DEFAULT_DELAY}s delay between messages")
+    print(f"⏳ Each account has {DEFAULT_DELAY}s delay between messages")
     
     tasks = []
     for account_name in running_accounts:
@@ -607,12 +607,13 @@ async def send_round_for_all_accounts():
     return results
 
 async def log_failed_message(account_name: str, channel_id: str, reason: str):
-    global data
+    """Log a failed message to the failed channel."""
+    global bot_data
     
-    account_data = data['accounts'].get(account_name)
-    if not account_data:
+    if account_name not in bot_data['accounts']:
         return
     
+    account_data = bot_data['accounts'][account_name]
     failed_channel_id = account_data.get('failed_channel_id')
     if not failed_channel_id:
         return
@@ -633,6 +634,7 @@ async def log_failed_message(account_name: str, channel_id: str, reason: str):
             account_data['failed_logs'] = account_data['failed_logs'][-50:]
         
         update_account(account_name, account_data)
+        save_data()
         
         embed = discord.Embed(
             title=f"❌ [{account_name}] MESSAGE FAILED",
@@ -647,11 +649,12 @@ async def log_failed_message(account_name: str, channel_id: str, reason: str):
         print(f"⚠️ Error logging: {e}")
 
 async def scheduled_send_task():
-    global data
+    """Main scheduled task that sends for ALL running accounts."""
+    global bot_data
     
     while True:
         try:
-            running = any(acc.get('is_running', False) for acc in data['accounts'].values())
+            running = any(acc.get('is_running', False) for acc in bot_data['accounts'].values())
             if not running:
                 await asyncio.sleep(5)
                 continue
@@ -659,7 +662,7 @@ async def scheduled_send_task():
             await send_round_for_all_accounts()
             
             min_interval = 1
-            for acc in data['accounts'].values():
+            for acc in bot_data['accounts'].values():
                 if acc.get('is_running', False):
                     interval = acc.get('schedule_interval', 1)
                     if interval < min_interval:
@@ -690,15 +693,19 @@ async def on_ready():
         global_send_task = asyncio.create_task(scheduled_send_task())
         print("✅ Global send task started")
 
-# -------- NEW COMMAND: SET DELAY --------
+# -------- COMMANDS --------
 
 @bot.command(name='setdelay')
 async def set_delay(ctx, seconds: int):
     """Set delay between messages for active account (in seconds)."""
-    account_data, error = get_active_account(ctx)
-    if not account_data:
-        await send_panel(ctx, "SET DELAY", error, success=False)
+    global bot_data
+    
+    account_name = bot_data.get('active_account')
+    if not account_name or account_name not in bot_data['accounts']:
+        await send_panel(ctx, "SET DELAY", "❌ No active account! Use `!account <name>` first.", success=False)
         return
+    
+    account_data = bot_data['accounts'][account_name]
     
     if seconds < 5:
         await send_panel(ctx, "SET DELAY", "❌ Delay must be at least 5 seconds!", success=False)
@@ -709,21 +716,19 @@ async def set_delay(ctx, seconds: int):
         return
     
     account_data['message_delay'] = seconds
-    update_account(data['active_account'], account_data)
-    save_data(data)
+    update_account(account_name, account_data)
+    save_data()
     
     await send_panel(ctx, "SET DELAY", 
-        f"✅ Delay set for `{data['active_account']}`: **{seconds} seconds** between messages!\n"
+        f"✅ Delay set for `{account_name}`: **{seconds} seconds** between messages!\n"
         f"⏳ This will help avoid rate limits.", 
         success=True)
 
-# -------- EXISTING COMMANDS (with updated descriptions) --------
-
 @bot.command(name='addaccount')
 async def add_account(ctx, account_name: str, *, token: str):
-    global data
+    global bot_data
     
-    if account_name in data['accounts']:
+    if account_name in bot_data['accounts']:
         await send_panel(ctx, "ADD ACCOUNT", f"❌ Account `{account_name}` already exists!", success=False)
         return
     
@@ -741,12 +746,12 @@ async def add_account(ctx, account_name: str, *, token: str):
     
     account_data = DEFAULT_ACCOUNT.copy()
     account_data['token'] = token
-    account_data['message_delay'] = DEFAULT_DELAY  # 30 seconds default
-    data['accounts'][account_name] = account_data
-    data['active_account'] = account_name
+    account_data['message_delay'] = DEFAULT_DELAY
+    bot_data['accounts'][account_name] = account_data
+    bot_data['active_account'] = account_name
     
     update_account(account_name, account_data)
-    save_data(data)
+    save_data()
     
     await send_panel(ctx, "ADD ACCOUNT", 
         f"✅ **Account Added!**\n📛 Name: `{account_name}`\n{result}\n\n"
@@ -756,7 +761,9 @@ async def add_account(ctx, account_name: str, *, token: str):
 
 @bot.command(name='accounts')
 async def list_accounts(ctx):
-    accounts = data.get('accounts', {})
+    global bot_data
+    
+    accounts = bot_data.get('accounts', {})
     
     if not accounts:
         await send_panel(ctx, "ACCOUNTS", "📭 No accounts added.", success=False)
@@ -775,16 +782,16 @@ async def list_accounts(ctx):
 
 @bot.command(name='account')
 async def select_account(ctx, account_name: str):
-    global data
+    global bot_data
     
-    if account_name not in data['accounts']:
+    if account_name not in bot_data['accounts']:
         await send_panel(ctx, "ACCOUNT", f"❌ Account `{account_name}` not found!", success=False)
         return
     
-    data['active_account'] = account_name
-    save_data(data)
+    bot_data['active_account'] = account_name
+    save_data()
     
-    account_data = data['accounts'][account_name]
+    account_data = bot_data['accounts'][account_name]
     status = "🟢 Running" if account_data.get('is_running', False) else "🔴 Stopped"
     delay = account_data.get('message_delay', DEFAULT_DELAY)
     
@@ -809,38 +816,39 @@ Failed: {account_data.get('failed_count', 0)}
 
 @bot.command(name='removeaccount')
 async def remove_account(ctx, account_name: str):
-    global data
+    global bot_data
     
-    if account_name not in data['accounts']:
+    if account_name not in bot_data['accounts']:
         await send_panel(ctx, "REMOVE ACCOUNT", f"❌ Account `{account_name}` not found!", success=False)
         return
     
-    if data['accounts'][account_name].get('is_running', False):
-        data['accounts'][account_name]['is_running'] = False
+    if bot_data['accounts'][account_name].get('is_running', False):
+        bot_data['accounts'][account_name]['is_running'] = False
     
     delete_account(account_name)
-    del data['accounts'][account_name]
     
-    if data.get('active_account') == account_name:
-        data['active_account'] = None
+    if bot_data.get('active_account') == account_name:
+        bot_data['active_account'] = None
     
-    save_data(data)
+    save_data()
     await send_panel(ctx, "REMOVE ACCOUNT", f"✅ Account `{account_name}` removed!", success=True)
 
 def get_active_account(ctx):
-    global data
+    global bot_data
     
-    account_name = data.get('active_account')
+    account_name = bot_data.get('active_account')
     if not account_name:
         return None, "❌ No active account!\nUse `!account <name>` to select one."
     
-    if account_name not in data['accounts']:
+    if account_name not in bot_data['accounts']:
         return None, f"❌ Account `{account_name}` no longer exists!"
     
-    return data['accounts'][account_name], None
+    return bot_data['accounts'][account_name], None
 
 @bot.command(name='addchannel')
 async def add_channel(ctx, *, channel_ids: str):
+    global bot_data
+    
     account_data, error = get_active_account(ctx)
     if not account_data:
         await send_panel(ctx, "ADD CHANNEL", error, success=False)
@@ -871,8 +879,9 @@ async def add_channel(ctx, *, channel_ids: str):
         account_data['channels'].append(cid)
         added.append(cid)
     
-    update_account(data['active_account'], account_data)
-    save_data(data)
+    account_name = bot_data.get('active_account')
+    update_account(account_name, account_data)
+    save_data()
     
     response_parts = []
     if added:
@@ -890,6 +899,8 @@ async def add_channel(ctx, *, channel_ids: str):
 
 @bot.command(name='removechannel')
 async def remove_channel(ctx, *, channel_ids: str):
+    global bot_data
+    
     account_data, error = get_active_account(ctx)
     if not account_data:
         await send_panel(ctx, "REMOVE CHANNEL", error, success=False)
@@ -914,8 +925,9 @@ async def remove_channel(ctx, *, channel_ids: str):
         else:
             not_found.append(cid)
     
-    update_account(data['active_account'], account_data)
-    save_data(data)
+    account_name = bot_data.get('active_account')
+    update_account(account_name, account_data)
+    save_data()
     
     response_parts = []
     if removed:
@@ -929,6 +941,8 @@ async def remove_channel(ctx, *, channel_ids: str):
 
 @bot.command(name='listchannels')
 async def list_channels(ctx):
+    global bot_data
+    
     account_data, error = get_active_account(ctx)
     if not account_data:
         await send_panel(ctx, "LIST CHANNELS", error, success=False)
@@ -936,7 +950,7 @@ async def list_channels(ctx):
     
     channels = account_data.get('channels', [])
     if not channels:
-        await send_panel(ctx, "LIST CHANNELS", f"📭 No channels added for `{data['active_account']}`.", success=False)
+        await send_panel(ctx, "LIST CHANNELS", f"📭 No channels added for `{bot_data.get('active_account')}`.", success=False)
         return
     
     channel_list = []
@@ -951,11 +965,13 @@ async def list_channels(ctx):
             channel_list.append(f"• `{cid}`")
     
     delay = account_data.get('message_delay', DEFAULT_DELAY)
-    content = f"**Account:** `{data['active_account']}`\n**Total:** {len(channels)}\n⏳ **Delay:** {delay}s\n\n" + "\n".join(channel_list)
+    content = f"**Account:** `{bot_data.get('active_account')}`\n**Total:** {len(channels)}\n⏳ **Delay:** {delay}s\n\n" + "\n".join(channel_list)
     await send_panel(ctx, "LIST CHANNELS", content, success=True)
 
 @bot.command(name='setmessage')
 async def set_message(ctx, *, message: str = None):
+    global bot_data
+    
     account_data, error = get_active_account(ctx)
     if not account_data:
         await send_panel(ctx, "SET MESSAGE", error, success=False)
@@ -991,12 +1007,13 @@ async def set_message(ctx, *, message: str = None):
         return
     
     account_data['message'] = message
-    update_account(data['active_account'], account_data)
-    save_data(data)
+    account_name = bot_data.get('active_account')
+    update_account(account_name, account_data)
+    save_data()
     
     preview = message[:150] + "..." if len(message) > 150 else message
     await send_panel(ctx, "SET MESSAGE", 
-        f"✅ Message set for `{data['active_account']}`!\n\n"
+        f"✅ Message set for `{account_name}`!\n\n"
         f"```\n{preview}\n```\n\n"
         f"📊 **Length:** {len(message)} characters\n"
         f"⏳ Delay: {account_data.get('message_delay', DEFAULT_DELAY)}s between messages", 
@@ -1004,6 +1021,8 @@ async def set_message(ctx, *, message: str = None):
 
 @bot.command(name='setinterval')
 async def set_interval(ctx, minutes: int):
+    global bot_data
+    
     account_data, error = get_active_account(ctx)
     if not account_data:
         await send_panel(ctx, "SET INTERVAL", error, success=False)
@@ -1014,15 +1033,18 @@ async def set_interval(ctx, minutes: int):
         return
     
     account_data['schedule_interval'] = minutes
-    update_account(data['active_account'], account_data)
-    save_data(data)
+    account_name = bot_data.get('active_account')
+    update_account(account_name, account_data)
+    save_data()
     
     await send_panel(ctx, "SET INTERVAL", 
-        f"✅ Interval set for `{data['active_account']}`: Every **{minutes} minute(s)**", 
+        f"✅ Interval set for `{account_name}`: Every **{minutes} minute(s)**", 
         success=True)
 
 @bot.command(name='failed')
 async def set_failed_channel(ctx, channel_id: str):
+    global bot_data
+    
     account_data, error = get_active_account(ctx)
     if not account_data:
         await send_panel(ctx, "SET FAILED CHANNEL", error, success=False)
@@ -1042,15 +1064,18 @@ async def set_failed_channel(ctx, channel_id: str):
         return
     
     account_data['failed_channel_id'] = channel_id
-    update_account(data['active_account'], account_data)
-    save_data(data)
+    account_name = bot_data.get('active_account')
+    update_account(account_name, account_data)
+    save_data()
     
     await send_panel(ctx, "SET FAILED CHANNEL", 
-        f"✅ Failed logs for `{data['active_account']}` will go to `{channel_id}`", 
+        f"✅ Failed logs for `{account_name}` will go to `{channel_id}`", 
         success=True)
 
 @bot.command(name='failedlogs')
 async def show_failed_logs(ctx):
+    global bot_data
+    
     account_data, error = get_active_account(ctx)
     if not account_data:
         await send_panel(ctx, "FAILED LOGS", error, success=False)
@@ -1058,11 +1083,11 @@ async def show_failed_logs(ctx):
     
     logs = account_data.get('failed_logs', [])
     if not logs:
-        await send_panel(ctx, "FAILED LOGS", f"📭 No failed logs for `{data['active_account']}`.", success=True)
+        await send_panel(ctx, "FAILED LOGS", f"📭 No failed logs for `{bot_data.get('active_account')}`.", success=True)
         return
     
     recent = logs[-10:]
-    content = f"**Account:** `{data['active_account']}`\n\n" + "\n".join([
+    content = f"**Account:** `{bot_data.get('active_account')}`\n\n" + "\n".join([
         f"• `{l.get('timestamp', '')[:16]}` | Channel: `{l.get('channel_id')}` | {l.get('reason', 'Unknown')}"
         for l in recent
     ])
@@ -1070,13 +1095,14 @@ async def show_failed_logs(ctx):
 
 @bot.command(name='start')
 async def start_account(ctx):
-    global data
+    global bot_data
     
-    account_name = data.get('active_account')
-    account_data, error = get_active_account(ctx)
-    if not account_data:
-        await send_panel(ctx, "START", error, success=False)
+    account_name = bot_data.get('active_account')
+    if not account_name or account_name not in bot_data['accounts']:
+        await send_panel(ctx, "START", "❌ No active account! Use `!account <name>` first.", success=False)
         return
+    
+    account_data = bot_data['accounts'][account_name]
     
     if not account_data.get('token'):
         await send_panel(ctx, "START", "❌ No token set!", success=False)
@@ -1091,15 +1117,21 @@ async def start_account(ctx):
         await send_panel(ctx, "START", "⚠️ Already running!", success=False)
         return
     
+    # Test token before starting
+    valid, result = await test_token(account_data.get('token'))
+    if not valid:
+        await send_panel(ctx, "START", f"❌ Token is invalid or expired!\n{result}\n\nGet a new token from Chrome and use `!settoken <new_token>`", success=False)
+        return
+    
     account_data['is_running'] = True
     account_data['sent_count'] = 0
     account_data['failed_count'] = 0
     account_data['total_rounds'] = 0
     
     update_account(account_name, account_data)
-    save_data(data)
+    save_data()
     
-    running = [name for name, acc in data['accounts'].items() if acc.get('is_running', False)]
+    running = [name for name, acc in bot_data['accounts'].items() if acc.get('is_running', False)]
     delay = account_data.get('message_delay', DEFAULT_DELAY)
     
     await send_panel(ctx, "START", 
@@ -1112,13 +1144,14 @@ async def start_account(ctx):
 
 @bot.command(name='stop')
 async def stop_account(ctx):
-    global data
+    global bot_data
     
-    account_name = data.get('active_account')
-    account_data, error = get_active_account(ctx)
-    if not account_data:
-        await send_panel(ctx, "STOP", error, success=False)
+    account_name = bot_data.get('active_account')
+    if not account_name or account_name not in bot_data['accounts']:
+        await send_panel(ctx, "STOP", "❌ No active account!", success=False)
         return
+    
+    account_data = bot_data['accounts'][account_name]
     
     if not account_data.get('is_running', False):
         await send_panel(ctx, "STOP", "⚠️ Not running!", success=False)
@@ -1126,7 +1159,7 @@ async def stop_account(ctx):
     
     account_data['is_running'] = False
     update_account(account_name, account_data)
-    save_data(data)
+    save_data()
     
     await send_panel(ctx, "STOP", 
         f"🛑 **Stopped `{account_name}`!**\n"
@@ -1136,9 +1169,9 @@ async def stop_account(ctx):
 
 @bot.command(name='sendnow')
 async def send_now(ctx):
-    global data
+    global bot_data
     
-    running = [name for name, acc in data['accounts'].items() if acc.get('is_running', False)]
+    running = [name for name, acc in bot_data['accounts'].items() if acc.get('is_running', False)]
     
     if not running:
         await send_panel(ctx, "SEND NOW", "❌ No accounts running!", success=False)
@@ -1160,9 +1193,9 @@ async def send_now(ctx):
 
 @bot.command(name='startall')
 async def start_all_accounts(ctx):
-    global data
+    global bot_data
     
-    accounts = data.get('accounts', {})
+    accounts = bot_data.get('accounts', {})
     if not accounts:
         await send_panel(ctx, "START ALL", "❌ No accounts found!", success=False)
         return
@@ -1171,16 +1204,19 @@ async def start_all_accounts(ctx):
     for name, acc in accounts.items():
         if not acc.get('is_running', False):
             if acc.get('token') and acc.get('channels') and acc.get('message'):
-                acc['is_running'] = True
-                acc['sent_count'] = 0
-                acc['failed_count'] = 0
-                acc['total_rounds'] = 0
-                started += 1
-                update_account(name, acc)
+                # Test token before starting
+                valid, _ = await test_token(acc.get('token'))
+                if valid:
+                    acc['is_running'] = True
+                    acc['sent_count'] = 0
+                    acc['failed_count'] = 0
+                    acc['total_rounds'] = 0
+                    started += 1
+                    update_account(name, acc)
     
-    save_data(data)
+    save_data()
     
-    running = [name for name, acc in data['accounts'].items() if acc.get('is_running', False)]
+    running = [name for name, acc in bot_data['accounts'].items() if acc.get('is_running', False)]
     
     await send_panel(ctx, "START ALL", 
         f"🚀 **Started {started} accounts!**\n"
@@ -1190,9 +1226,9 @@ async def start_all_accounts(ctx):
 
 @bot.command(name='stopall')
 async def stop_all_accounts(ctx):
-    global data
+    global bot_data
     
-    accounts = data.get('accounts', {})
+    accounts = bot_data.get('accounts', {})
     stopped = 0
     
     for name, acc in accounts.items():
@@ -1201,20 +1237,22 @@ async def stop_all_accounts(ctx):
             stopped += 1
             update_account(name, acc)
     
-    save_data(data)
+    save_data()
     
     await send_panel(ctx, "STOP ALL", f"🛑 **Stopped {stopped} accounts!**", success=True)
 
 @bot.command(name='status')
 async def show_status(ctx):
-    account_name = data.get('active_account')
-    account_data, error = get_active_account(ctx)
-    if not account_data:
-        await send_panel(ctx, "STATUS", error, success=False)
+    global bot_data
+    
+    account_name = bot_data.get('active_account')
+    if not account_name or account_name not in bot_data['accounts']:
+        await send_panel(ctx, "STATUS", "❌ No active account! Use `!account <name>` first.", success=False)
         return
     
+    account_data = bot_data['accounts'][account_name]
     running = account_data.get('is_running', False)
-    all_running = [name for name, acc in data['accounts'].items() if acc.get('is_running', False)]
+    all_running = [name for name, acc in bot_data['accounts'].items() if acc.get('is_running', False)]
     delay = account_data.get('message_delay', DEFAULT_DELAY)
     
     content = f"""**Account:** `{account_name}`
@@ -1229,9 +1267,9 @@ async def show_status(ctx):
 
 **Global Stats:**
 🔄 Running: **{len(all_running)}**
-✅ Total Sent: {data.get('total_sent', 0)}
-❌ Total Failed: {data.get('total_failed', 0)}
-📋 Total Accounts: {len(data.get('accounts', {}))}
+✅ Total Sent: {bot_data.get('total_sent', 0)}
+❌ Total Failed: {bot_data.get('total_failed', 0)}
+📋 Total Accounts: {len(bot_data.get('accounts', {}))}
 
 🗄️ Redis: {"Connected ✅" if redis_manager.connected else "Disconnected ❌"}"""
     
@@ -1239,6 +1277,8 @@ async def show_status(ctx):
 
 @bot.command(name='clear')
 async def clear_settings(ctx):
+    global bot_data
+    
     account_data, error = get_active_account(ctx)
     if not account_data:
         await send_panel(ctx, "CLEAR", error, success=False)
@@ -1252,10 +1292,11 @@ async def clear_settings(ctx):
         if key != 'token':
             account_data[key] = DEFAULT_ACCOUNT[key]
     
-    update_account(data['active_account'], account_data)
-    save_data(data)
+    account_name = bot_data.get('active_account')
+    update_account(account_name, account_data)
+    save_data()
     
-    await send_panel(ctx, "CLEAR", f"🗑️ Settings cleared for `{data['active_account']}`!", success=True)
+    await send_panel(ctx, "CLEAR", f"🗑️ Settings cleared for `{account_name}`!", success=True)
 
 @bot.command(name='commands')
 async def show_commands(ctx):
