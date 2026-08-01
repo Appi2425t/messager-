@@ -5,6 +5,8 @@
 # - ALL accounts send messages at the SAME TIME
 # - Each account has independent channels/message/schedule
 # - True parallel sending using asyncio.gather()
+# - Support for long messages via .txt file upload
+# - Add multiple channels at once (comma-separated)
 # - Failed logs per account
 # - Professional panel replies with developer credit
 # =============================================================
@@ -17,9 +19,10 @@ import os
 import time
 import aiohttp
 import datetime
+import sys
 
 try:
-    from flask import Flask
+    from flask import Flask, request, jsonify
     import threading
     FLASK_AVAILABLE = True
 except ImportError:
@@ -77,7 +80,7 @@ DEFAULT_SETTINGS = {
     'active_account': None,
     'total_sent': 0,
     'total_failed': 0,
-    'simultaneous_mode': True  # NEW: Send all accounts at once
+    'simultaneous_mode': True
 }
 
 # =============================================================
@@ -206,7 +209,6 @@ async def test_token(token: str):
 # =============================================================
 
 async def send_single_message(channel_id: str, message: str, token: str, account_name: str) -> tuple:
-    """Send a single message and return (success, error_message)."""
     token = clean_token(token)
     if not token:
         return False, "Invalid token"
@@ -245,7 +247,6 @@ async def send_single_message(channel_id: str, message: str, token: str, account
         return False, error_msg
 
 async def send_round_for_account(account_name: str) -> dict:
-    """Send one round for a single account. Returns stats."""
     global data
     
     account_data = data['accounts'].get(account_name)
@@ -262,12 +263,10 @@ async def send_round_for_account(account_name: str) -> dict:
     sent = 0
     failed = 0
     
-    # Create tasks for all channels in this account (send simultaneously)
     tasks = []
     for channel_id in channels:
         tasks.append(send_single_message(channel_id, message, token, account_name))
     
-    # Wait for all messages to send in parallel
     results = await asyncio.gather(*tasks)
     
     for success, error in results:
@@ -286,7 +285,6 @@ async def send_round_for_account(account_name: str) -> dict:
     return {'sent': sent, 'failed': failed, 'account': account_name}
 
 async def send_round_for_all_accounts():
-    """Send one round for ALL accounts simultaneously."""
     global data
     
     accounts = data.get('accounts', {})
@@ -297,12 +295,10 @@ async def send_round_for_all_accounts():
     
     print(f"\n🔄 Sending round for {len(running_accounts)} accounts simultaneously...")
     
-    # Create tasks for each account (each account sends to its channels)
     tasks = []
     for account_name in running_accounts:
         tasks.append(send_round_for_account(account_name))
     
-    # Wait for ALL accounts to finish sending simultaneously
     results = await asyncio.gather(*tasks)
     
     total_sent = sum(r.get('sent', 0) for r in results)
@@ -352,21 +348,17 @@ async def log_failed_message(account_name: str, channel_id: str, reason: str):
         print(f"⚠️ Error logging: {e}")
 
 async def scheduled_send_task():
-    """Main scheduled task that sends for ALL running accounts simultaneously."""
     global data
     
     while True:
         try:
-            # Check if any accounts are running
             running = any(acc.get('is_running', False) for acc in data['accounts'].values())
             if not running:
                 await asyncio.sleep(1)
                 continue
             
-            # Send to ALL running accounts at the same time
             await send_round_for_all_accounts()
             
-            # Get the smallest interval among running accounts
             min_interval = 1
             for acc in data['accounts'].values():
                 if acc.get('is_running', False):
@@ -392,9 +384,7 @@ async def on_ready():
     
     print(f'✅ Bot online: {bot.user.name}')
     print(f'📡 Connected to {len(bot.guilds)} servers')
-    print(f'🔄 Simultaneous Mode: {"ON" if data.get("simultaneous_mode", True) else "OFF"}')
     
-    # Start the global send task if not already running
     if global_send_task is None or global_send_task.done():
         global_send_task = asyncio.create_task(scheduled_send_task())
         print("✅ Global send task started")
@@ -427,7 +417,7 @@ async def add_account(ctx, account_name: str, *, token: str):
     data['active_account'] = account_name
     save_data(data)
     
-    await send_panel(ctx, "ADD ACCOUNT", f"✅ **Account Added!**\n📛 Name: `{account_name}`\n{result}\n\nUse `!account {account_name}` to configure it.\n\n📌 **All accounts will send simultaneously!**", success=True)
+    await send_panel(ctx, "ADD ACCOUNT", f"✅ **Account Added!**\n📛 Name: `{account_name}`\n{result}\n\nUse `!account {account_name}` to configure it.", success=True)
 
 @bot.command(name='accounts')
 async def list_accounts(ctx):
@@ -437,14 +427,13 @@ async def list_accounts(ctx):
         await send_panel(ctx, "ACCOUNTS", "📭 No accounts added.", success=False)
         return
     
-    content = "**📋 All Accounts (Send Simultaneously):**\n\n"
+    content = "**📋 All Accounts:**\n\n"
     for name, acc in accounts.items():
         status = "🟢 Running" if acc.get('is_running', False) else "🔴 Stopped"
         channels = len(acc.get('channels', []))
         token_preview = acc.get('token', 'Not set')[:20] + '...' if acc.get('token') else 'Not set'
         content += f"• **{name}**\n  └ Status: {status} | Channels: {channels}\n\n"
     
-    content += f"\n🔄 **Mode:** Simultaneous (All accounts send at the same time)"
     await send_panel(ctx, "ACCOUNTS", content, success=True)
 
 @bot.command(name='account')
@@ -467,15 +456,12 @@ Channels: {len(account_data.get('channels', []))}
 Interval: Every {account_data.get('schedule_interval', 1)} minute(s)
 Sent: {account_data.get('sent_count', 0)}
 Failed: {account_data.get('failed_count', 0)}
-Failed Logs: `{account_data.get('failed_channel_id', 'Not set')}`
 
 **Commands now apply to this account!**
-`!addchannel <id>` - Add channel
-`!setmessage <msg>` - Set message
+`!addchannel <id1,id2,id3>` - Add multiple channels
+`!setmessage <msg>` - Set message (or attach .txt file)
 `!start` - Start this account
 `!stop` - Stop this account
-
-**All running accounts send simultaneously!**
 """
     await send_panel(ctx, "ACCOUNT", content, success=True)
 
@@ -512,41 +498,98 @@ def get_active_account(ctx):
     return data['accounts'][account_name], None
 
 @bot.command(name='addchannel')
-async def add_channel(ctx, channel_id: str):
+async def add_channel(ctx, *, channel_ids: str):
+    """Add multiple channel IDs (comma-separated)."""
     account_data, error = get_active_account(ctx)
     if not account_data:
         await send_panel(ctx, "ADD CHANNEL", error, success=False)
         return
     
-    if not channel_id.isdigit():
-        await send_panel(ctx, "ADD CHANNEL", "❌ Invalid channel ID!", success=False)
-        return
+    # Split by comma, semicolon, or space
+    channel_list = []
+    for separator in [',', ';', ' ']:
+        if separator in channel_ids:
+            channel_list = [c.strip() for c in channel_ids.split(separator) if c.strip()]
+            break
     
-    if channel_id in account_data.get('channels', []):
-        await send_panel(ctx, "ADD CHANNEL", f"⚠️ Channel already added!", success=False)
-        return
+    if not channel_list:
+        channel_list = [channel_ids.strip()]
     
-    account_data['channels'].append(channel_id)
+    # Validate and add
+    added = []
+    skipped = []
+    invalid = []
+    
+    for cid in channel_list:
+        if not cid.isdigit():
+            invalid.append(cid)
+            continue
+        
+        if cid in account_data.get('channels', []):
+            skipped.append(cid)
+            continue
+        
+        account_data['channels'].append(cid)
+        added.append(cid)
+    
     save_data(data)
     
-    await send_panel(ctx, "ADD CHANNEL", f"✅ Channel added to `{data['active_account']}`!\nTotal: **{len(account_data['channels'])}**", success=True)
+    # Build response
+    response_parts = []
+    if added:
+        response_parts.append(f"✅ Added: `{', '.join(added)}`")
+    if skipped:
+        response_parts.append(f"⚠️ Skipped (already exist): `{', '.join(skipped)}`")
+    if invalid:
+        response_parts.append(f"❌ Invalid: `{', '.join(invalid)}`")
+    
+    response_parts.append(f"📊 Total channels: **{len(account_data['channels'])}**")
+    
+    await send_panel(ctx, "ADD CHANNEL", "\n".join(response_parts), success=True if added else False)
 
 @bot.command(name='removechannel')
-async def remove_channel(ctx, channel_id: str):
+async def remove_channel(ctx, *, channel_ids: str):
+    """Remove multiple channel IDs (comma-separated)."""
     account_data, error = get_active_account(ctx)
     if not account_data:
         await send_panel(ctx, "REMOVE CHANNEL", error, success=False)
         return
     
-    if channel_id in account_data.get('channels', []):
-        account_data['channels'].remove(channel_id)
-        save_data(data)
-        await send_panel(ctx, "REMOVE CHANNEL", f"✅ Channel removed from `{data['active_account']}`!", success=True)
-    else:
-        await send_panel(ctx, "REMOVE CHANNEL", f"⚠️ Channel not found!", success=False)
+    # Split by comma, semicolon, or space
+    channel_list = []
+    for separator in [',', ';', ' ']:
+        if separator in channel_ids:
+            channel_list = [c.strip() for c in channel_ids.split(separator) if c.strip()]
+            break
+    
+    if not channel_list:
+        channel_list = [channel_ids.strip()]
+    
+    removed = []
+    not_found = []
+    
+    for cid in channel_list:
+        if cid in account_data.get('channels', []):
+            account_data['channels'].remove(cid)
+            removed.append(cid)
+        else:
+            not_found.append(cid)
+    
+    save_data(data)
+    
+    response_parts = []
+    if removed:
+        response_parts.append(f"✅ Removed: `{', '.join(removed)}`")
+    if not_found:
+        response_parts.append(f"⚠️ Not found: `{', '.join(not_found)}`")
+    
+    response_parts.append(f"📊 Total channels: **{len(account_data['channels'])}**")
+    
+    await send_panel(ctx, "REMOVE CHANNEL", "\n".join(response_parts), success=True if removed else False)
 
 @bot.command(name='listchannels')
 async def list_channels(ctx):
+    """List all channels for active account."""
     account_data, error = get_active_account(ctx)
     if not account_data:
         await send_panel(ctx, "LIST CHANNELS", error, success=False)
@@ -557,26 +600,63 @@ async def list_channels(ctx):
         await send_panel(ctx, "LIST CHANNELS", f"📭 No channels added for `{data['active_account']}`.", success=False)
         return
     
-    content = f"**Account:** `{data['active_account']}`\n**Total:** {len(channels)}\n\n" + "\n".join([f"• `{c}`" for c in channels])
+    # Try to get channel names
+    channel_list = []
+    for cid in channels:
+        try:
+            channel = bot.get_channel(int(cid))
+            if channel:
+                channel_list.append(f"• #{channel.name} (`{cid}`)")
+            else:
+                channel_list.append(f"• `{cid}` (unknown)")
+        except:
+            channel_list.append(f"• `{cid}`")
+    
+    content = f"**Account:** `{data['active_account']}`\n**Total:** {len(channels)}\n\n" + "\n".join(channel_list)
     await send_panel(ctx, "LIST CHANNELS", content, success=True)
 
 @bot.command(name='setmessage')
-async def set_message(ctx, *, message: str):
+async def set_message(ctx, *, message: str = None):
+    """Set the message to send for active account.\nCan also attach a .txt file."""
     account_data, error = get_active_account(ctx)
     if not account_data:
         await send_panel(ctx, "SET MESSAGE", error, success=False)
         return
     
-    if len(message) > 2000:
-        await send_panel(ctx, "SET MESSAGE", "❌ Message too long!", success=False)
+    # If no message provided, try to read from attached text file
+    if message is None:
+        if ctx.message.attachments:
+            for attachment in ctx.message.attachments:
+                if attachment.filename.endswith('.txt'):
+                    try:
+                        content = await attachment.read()
+                        message = content.decode('utf-8')
+                        break
+                    except Exception as e:
+                        await send_panel(ctx, "SET MESSAGE", f"❌ Error reading file: {str(e)}", success=False)
+                        return
+                else:
+                    await send_panel(ctx, "SET MESSAGE", "❌ Please attach a `.txt` file!", success=False)
+                    return
+        else:
+            await send_panel(ctx, "SET MESSAGE", "❌ Please provide a message or attach a `.txt` file!\n\n**Example:** `!setmessage Hello World!`\n**OR:** `!setmessage` (with .txt file attached)", success=False)
+            return
+    
+    # Check length
+    if len(message) > 4000:
+        await send_panel(ctx, "SET MESSAGE", f"❌ Message too long! Max 4000 characters. You have **{len(message)}** characters.", success=False)
         return
     
     account_data['message'] = message
     save_data(data)
-    await send_panel(ctx, "SET MESSAGE", f"✅ Message set for `{data['active_account']}`!\n\n```{message[:100]}```", success=True)
+    
+    # Preview
+    preview = message[:150] + "..." if len(message) > 150 else message
+    await send_panel(ctx, "SET MESSAGE", f"✅ Message set for `{data['active_account']}`!\n\n```\n{preview}\n```\n\n📊 **Length:** {len(message)} characters", success=True)
 
 @bot.command(name='setinterval')
 async def set_interval(ctx, minutes: int):
+    """Set the interval between sends (1-60 minutes)."""
     account_data, error = get_active_account(ctx)
     if not account_data:
         await send_panel(ctx, "SET INTERVAL", error, success=False)
@@ -592,6 +672,7 @@ async def set_interval(ctx, minutes: int):
 
 @bot.command(name='failed')
 async def set_failed_channel(ctx, channel_id: str):
+    """Set failed logs channel for active account."""
     account_data, error = get_active_account(ctx)
     if not account_data:
         await send_panel(ctx, "SET FAILED CHANNEL", error, success=False)
@@ -616,6 +697,7 @@ async def set_failed_channel(ctx, channel_id: str):
 
 @bot.command(name='failedlogs')
 async def show_failed_logs(ctx):
+    """Show failed logs for active account."""
     account_data, error = get_active_account(ctx)
     if not account_data:
         await send_panel(ctx, "FAILED LOGS", error, success=False)
@@ -635,7 +717,7 @@ async def show_failed_logs(ctx):
 
 @bot.command(name='start')
 async def start_account(ctx):
-    """Start sending for active account (will send simultaneously with other running accounts)."""
+    """Start sending for active account."""
     global data
     
     account_name = data.get('active_account')
@@ -663,7 +745,6 @@ async def start_account(ctx):
     account_data['total_rounds'] = 0
     save_data(data)
     
-    # Get all running accounts
     running = [name for name, acc in data['accounts'].items() if acc.get('is_running', False)]
     
     await send_panel(ctx, "START", f"🚀 **Started `{account_name}`!**\n📊 Channels: {len(account_data['channels'])}\n⏱️ Interval: Every {account_data['schedule_interval']} minute(s)\n\n🔄 **All running accounts ({len(running)}) will send simultaneously!**", success=True)
@@ -761,8 +842,6 @@ async def show_status(ctx):
         return
     
     running = account_data.get('is_running', False)
-    
-    # Count all running accounts
     all_running = [name for name, acc in data['accounts'].items() if acc.get('is_running', False)]
     
     content = f"""**Account:** `{account_name}`
@@ -787,6 +866,7 @@ async def show_status(ctx):
 
 @bot.command(name='clear')
 async def clear_settings(ctx):
+    """Clear settings for active account."""
     account_data, error = get_active_account(ctx)
     if not account_data:
         await send_panel(ctx, "CLEAR", error, success=False)
@@ -804,6 +884,7 @@ async def clear_settings(ctx):
 
 @bot.command(name='commands')
 async def show_commands(ctx):
+    """Show all available commands."""
     content = """
 **📋 Multi-Account Commands (Simultaneous Mode)**
 
@@ -814,10 +895,10 @@ async def show_commands(ctx):
 `!removeaccount <name>` - Remove account
 
 **Account Configuration (applies to active account):**
-`!addchannel <id>` - Add channel
-`!removechannel <id>` - Remove channel
+`!addchannel <id1,id2,id3>` - Add multiple channels (comma-separated)
+`!removechannel <id1,id2,id3>` - Remove multiple channels
 `!listchannels` - List channels
-`!setmessage <msg>` - Set message
+`!setmessage <msg>` - Set message (or attach .txt file)
 `!setinterval <min>` - Set interval (1-60 min)
 `!failed <channel_id>` - Set failed logs channel
 `!failedlogs` - Show failed logs
@@ -836,19 +917,15 @@ async def show_commands(ctx):
 
 **⚡ ALL running accounts send SIMULTANEOUSLY!**
 
-**Example:**
+**Example Workflow:**
 1. `!addaccount main mfa.xxxxx`
-2. `!addaccount alt OTA.xxxxx`
-3. `!account main`
-4. `!addchannel 123456789`
-5. `!setmessage Hello from main!`
+2. `!account main`
+3. `!addchannel 123456789,987654321,456789123`
+4. `!setmessage Hello!` (or attach .txt file)
+5. `!setinterval 5`
 6. `!start`
-7. `!account alt`
-8. `!addchannel 987654321`
-9. `!setmessage Hello from alt!`
-10. `!start`
 
-Both accounts will send at the SAME TIME! ⚡
+**Long Messages:** Use `!setmessage` and attach a `.txt` file!
 """
     await send_panel(ctx, "COMMANDS", content, color=discord.Color.blue())
 
@@ -872,7 +949,6 @@ async def on_command_error(ctx, error):
 def main():
     print("🚀 Starting Simultaneous Multi-Account Bot...")
     print(f"📁 Data file: {DATA_FILE}")
-    print("⚡ All accounts will send messages SIMULTANEOUSLY!")
     
     if not BOT_TOKEN:
         print("❌ No BOT_TOKEN found! Set in Railway Variables")
