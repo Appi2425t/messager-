@@ -9,14 +9,13 @@
 # =============================================================
 
 import discord
-from discord.ext import commands, tasks
+from discord.ext import commands
 import asyncio
 import json
 import os
 import time
 import aiohttp
 import datetime
-from typing import List, Dict, Any
 import random
 
 # =============================================================
@@ -235,7 +234,7 @@ async def scheduled_send_task():
     print(f"❌ Total failed: {user_data.get('failed_count', 0)}")
 
 # =============================================================
-# BOT COMMANDS
+# BOT COMMANDS (FIXED - NO "help" CONFLICT)
 # =============================================================
 
 @bot.event
@@ -245,18 +244,18 @@ async def on_ready():
     print(f'🆔 Bot ID: {bot.user.id}')
     print(f'📡 Connected to {len(bot.guilds)} servers')
     print(f'\n📋 Commands:')
-    print(f'  !set_token <token> - Set user token')
-    print(f'  !add_channel <channel_id> - Add a channel to send to')
-    print(f'  !remove_channel <channel_id> - Remove a channel')
-    print(f'  !list_channels - List all channels')
-    print(f'  !set_message <message> - Set the message to send')
-    print(f'  !set_interval <minutes> - Set interval between sends (1-60 minutes)')
+    print(f'  !settoken <token> - Set user token')
+    print(f'  !addchannel <channel_id> - Add a channel to send to')
+    print(f'  !removechannel <channel_id> - Remove a channel')
+    print(f'  !listchannels - List all channels')
+    print(f'  !setmessage <message> - Set the message to send')
+    print(f'  !setinterval <minutes> - Set interval between sends (1-60 minutes)')
     print(f'  !start - Start scheduled sending')
     print(f'  !stop - Stop scheduled sending')
     print(f'  !status - Show current status')
     print(f'  !clear - Clear all settings')
-    print(f'  !help - Show this help')
-    print(f'  !send_now - Send one round immediately')
+    print(f'  !commands - Show all commands')
+    print(f'  !sendnow - Send one round immediately')
     
     # Check for saved session
     if user_data.get('is_running', False):
@@ -265,7 +264,7 @@ async def on_ready():
         if sending_task is None or sending_task.done():
             sending_task = asyncio.create_task(scheduled_send_task())
 
-@bot.command(name='set_token')
+@bot.command(name='settoken')
 async def set_token(ctx, token: str):
     """Set the user account token to use for sending messages."""
     global user_data
@@ -284,7 +283,7 @@ async def set_token(ctx, token: str):
     else:
         await ctx.send("❌ Failed to save token!")
 
-@bot.command(name='add_channel')
+@bot.command(name='addchannel')
 async def add_channel(ctx, channel_id: str):
     """Add a channel ID to send messages to."""
     global user_data
@@ -310,7 +309,7 @@ async def add_channel(ctx, channel_id: str):
     except:
         await ctx.send(f"✅ Added channel ID: `{channel_id}`")
 
-@bot.command(name='remove_channel')
+@bot.command(name='removechannel')
 async def remove_channel(ctx, channel_id: str):
     """Remove a channel ID from the list."""
     global user_data
@@ -322,13 +321,13 @@ async def remove_channel(ctx, channel_id: str):
     else:
         await ctx.send(f"⚠️ Channel `{channel_id}` not found in list!")
 
-@bot.command(name='list_channels')
+@bot.command(name='listchannels')
 async def list_channels(ctx):
     """List all channels that have been added."""
     channels = user_data.get('channels', [])
     
     if not channels:
-        await ctx.send("📭 No channels added yet. Use `!add_channel <channel_id>` to add one.")
+        await ctx.send("📭 No channels added yet. Use `!addchannel <channel_id>` to add one.")
         return
     
     channel_list = []
@@ -345,7 +344,7 @@ async def list_channels(ctx):
     response = f"📋 **Channels ({len(channel_list)}):**\n" + "\n".join(f"• {ch}" for ch in channel_list)
     await ctx.send(response)
 
-@bot.command(name='set_message')
+@bot.command(name='setmessage')
 async def set_message(ctx, *, message: str):
     """Set the message to send."""
     global user_data
@@ -360,7 +359,7 @@ async def set_message(ctx, *, message: str):
     preview = message[:100] + "..." if len(message) > 100 else message
     await ctx.send(f"✅ Message set!\n```\n{preview}\n```")
 
-@bot.command(name='set_interval')
+@bot.command(name='setinterval')
 async def set_interval(ctx, minutes: int):
     """Set the interval between sends (1-60 minutes)."""
     global user_data
@@ -385,15 +384,15 @@ async def start_sending(ctx):
     
     # Check if everything is configured
     if not user_data.get('user_token'):
-        await ctx.send("❌ No user token set! Use `!set_token <token>` first.")
+        await ctx.send("❌ No user token set! Use `!settoken <token>` first.")
         return
     
     if not user_data.get('channels'):
-        await ctx.send("❌ No channels added! Use `!add_channel <channel_id>` to add one.")
+        await ctx.send("❌ No channels added! Use `!addchannel <channel_id>` to add one.")
         return
     
     if not user_data.get('message'):
-        await ctx.send("❌ No message set! Use `!set_message <message>` first.")
+        await ctx.send("❌ No message set! Use `!setmessage <message>` first.")
         return
     
     if user_data.get('is_running', False):
@@ -447,7 +446,7 @@ async def stop_sending(ctx):
                    f"✅ Sent: {user_data.get('sent_count', 0)}\n"
                    f"❌ Failed: {user_data.get('failed_count', 0)}")
 
-@bot.command(name='send_now')
+@bot.command(name='sendnow')
 async def send_now(ctx):
     """Send one round immediately (doesn't affect schedule)."""
     await ctx.send("📨 Sending one round immediately...")
@@ -510,36 +509,36 @@ async def clear_settings(ctx):
     save_data(user_data)
     await ctx.send("🗑️ **All settings cleared!**")
 
-@bot.command(name='help')
-async def help_command(ctx):
+@bot.command(name='commands')
+async def show_commands(ctx):
     """Show all available commands."""
     help_text = """
 📋 **Available Commands:**
 
 **Setup Commands:**
-`!set_token <token>` - Set the user account token
-`!add_channel <channel_id>` - Add a channel to send to
-`!remove_channel <channel_id>` - Remove a channel
-`!list_channels` - List all added channels
-`!set_message <message>` - Set the message to send
-`!set_interval <minutes>` - Set interval between sends (1-60 minutes)
+`!settoken <token>` - Set the user account token
+`!addchannel <channel_id>` - Add a channel to send to
+`!removechannel <channel_id>` - Remove a channel
+`!listchannels` - List all added channels
+`!setmessage <message>` - Set the message to send
+`!setinterval <minutes>` - Set interval between sends (1-60 minutes)
 
 **Control Commands:**
 `!start` - Start scheduled sending
 `!stop` - Stop scheduled sending
-`!send_now` - Send one round immediately
+`!sendnow` - Send one round immediately
 `!status` - Show current status
 
 **Other:**
 `!clear` - Clear all settings
-`!help` - Show this help message
+`!commands` - Show this command list
 
 **Example Workflow:**
-1. `!set_token mfa.xxxxxxxxxxxxxxxx`
-2. `!add_channel 123456789012345678`
-3. `!add_channel 987654321098765432`
-4. `!set_message Hello everyone!`
-5. `!set_interval 5`
+1. `!settoken mfa.xxxxxxxxxxxxxxxx`
+2. `!addchannel 123456789012345678`
+3. `!addchannel 987654321098765432`
+4. `!setmessage Hello everyone!`
+5. `!setinterval 5`
 6. `!start`
 7. `!status` (to check progress)
 8. `!stop` (to stop)
@@ -553,11 +552,11 @@ async def help_command(ctx):
 @bot.event
 async def on_command_error(ctx, error):
     if isinstance(error, commands.MissingRequiredArgument):
-        await ctx.send(f"❌ Missing required argument! Use `!help` for usage.")
+        await ctx.send(f"❌ Missing required argument! Use `!commands` for usage.")
     elif isinstance(error, commands.BadArgument):
-        await ctx.send(f"❌ Invalid argument! Use `!help` for usage.")
+        await ctx.send(f"❌ Invalid argument! Use `!commands` for usage.")
     elif isinstance(error, commands.CommandNotFound):
-        await ctx.send(f"❌ Unknown command! Use `!help` for a list of commands.")
+        await ctx.send(f"❌ Unknown command! Use `!commands` for a list of commands.")
     else:
         await ctx.send(f"❌ Error: {str(error)}")
         print(f"Error: {error}")
