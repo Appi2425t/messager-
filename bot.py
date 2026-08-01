@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 # =============================================================
-# DISCORD BOT - SIMULTANEOUS MULTI-ACCOUNT MESSENGER (REDIS)
+# DISCORD BOT - DISCORD PANEL CONTROL
 # =============================================================
-# - 30 SECOND DELAY between messages
-# - Web Panel integration (API endpoints)
-# - ALL accounts send simultaneously
-# - Redis storage
+# - Interactive Discord panels with buttons
+# - Account management via Discord
+# - View status, channels, delay, stats
+# - Start/Stop/Edit/Delete accounts with buttons
+# - Clean panel-style embeds
 # =============================================================
 
 import discord
 from discord.ext import commands
+from discord.ui import Button, View, Select
 import asyncio
 import json
 import os
@@ -19,13 +21,6 @@ import datetime
 import sys
 import redis
 import random
-import threading
-
-try:
-    from flask import Flask, request, jsonify, render_template_string
-    FLASK_AVAILABLE = True
-except ImportError:
-    FLASK_AVAILABLE = False
 
 # =============================================================
 # REDIS DATABASE CONNECTION
@@ -97,14 +92,6 @@ class RedisManager:
         except Exception as e:
             return False
     
-    def keys(self, pattern: str = '*'):
-        if not self.connected:
-            return []
-        try:
-            return self.client.keys(pattern)
-        except Exception as e:
-            return []
-    
     def hset(self, name: str, key: str, value):
         if not self.connected:
             return False
@@ -118,14 +105,6 @@ class RedisManager:
         except Exception as e:
             print(f"⚠️ Redis hset error: {e}")
             return False
-    
-    def hget(self, name: str, key: str):
-        if not self.connected:
-            return None
-        try:
-            return self.client.hget(name, key)
-        except Exception as e:
-            return None
     
     def hgetall(self, name: str):
         if not self.connected:
@@ -217,7 +196,7 @@ def load_data():
         return bot_data
         
     except Exception as e:
-        print(f"⚠️ Error loading data from Redis: {e}")
+        print(f"⚠️ Error loading data: {e}")
         bot_data = {'accounts': {}, 'active_account': None, 'total_sent': 0, 'total_failed': 0}
         return bot_data
 
@@ -249,7 +228,7 @@ def save_data():
         return True
         
     except Exception as e:
-        print(f"⚠️ Error saving data to Redis: {e}")
+        print(f"⚠️ Error saving data: {e}")
         return False
 
 def update_account(account_name: str, account_data: dict):
@@ -278,10 +257,10 @@ def update_account(account_name: str, account_data: dict):
         return True
         
     except Exception as e:
-        print(f"⚠️ Error updating account in Redis: {e}")
+        print(f"⚠️ Error updating account: {e}")
         return False
 
-def delete_account(account_name: str):
+def delete_account_data(account_name: str):
     global bot_data
     
     try:
@@ -303,7 +282,7 @@ def delete_account(account_name: str):
         return True
         
     except Exception as e:
-        print(f"⚠️ Error deleting account from Redis: {e}")
+        print(f"⚠️ Error deleting account: {e}")
         return False
 
 # =============================================================
@@ -334,6 +313,7 @@ DEFAULT_ACCOUNT = {
 intents = discord.Intents.default()
 intents.message_content = True
 intents.guilds = True
+intents.members = True
 
 bot = commands.Bot(command_prefix='!', intents=intents)
 
@@ -348,32 +328,233 @@ rate_limited = {}
 rate_limit_until = {}
 
 # =============================================================
-# PANEL REPLY HELPER
+# BUTTON VIEWS (Discord Panel)
 # =============================================================
 
-def create_panel(title: str, content: str, color=None, success=None) -> discord.Embed:
-    if color is None:
-        color = discord.Color.blue()
-    if success is True:
-        color = discord.Color.green()
-    elif success is False:
-        color = discord.Color.red()
+class AccountControlView(View):
+    """View with account control buttons."""
     
+    def __init__(self, account_name: str):
+        super().__init__(timeout=None)
+        self.account_name = account_name
+        
+        # Get account data
+        account_data = bot_data['accounts'].get(account_name, {})
+        is_running = account_data.get('is_running', False)
+        
+        # Start/Stop button
+        if is_running:
+            self.add_item(Button(
+                label="⏹ Stop",
+                style=discord.ButtonStyle.danger,
+                custom_id=f"stop_{account_name}"
+            ))
+        else:
+            self.add_item(Button(
+                label="▶ Start",
+                style=discord.ButtonStyle.success,
+                custom_id=f"start_{account_name}"
+            ))
+        
+        self.add_item(Button(
+            label="✏️ Edit",
+            style=discord.ButtonStyle.primary,
+            custom_id=f"edit_{account_name}"
+        ))
+        
+        self.add_item(Button(
+            label="🗑 Delete",
+            style=discord.ButtonStyle.danger,
+            custom_id=f"delete_{account_name}"
+        ))
+        
+        self.add_item(Button(
+            label="📊 Stats",
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"stats_{account_name}"
+        ))
+        
+        self.add_item(Button(
+            label="🔙 Back",
+            style=discord.ButtonStyle.secondary,
+            custom_id="back_to_panel"
+        ))
+
+class MainPanelView(View):
+    """Main panel with account selection."""
+    
+    def __init__(self):
+        super().__init__(timeout=None)
+        
+        # Refresh button
+        self.add_item(Button(
+            label="🔄 Refresh",
+            style=discord.ButtonStyle.primary,
+            custom_id="refresh_panel"
+        ))
+        
+        # Add Account button
+        self.add_item(Button(
+            label="➕ Add Account",
+            style=discord.ButtonStyle.success,
+            custom_id="add_account_panel"
+        ))
+
+class EditAccountView(View):
+    """View for editing account settings."""
+    
+    def __init__(self, account_name: str):
+        super().__init__(timeout=None)
+        self.account_name = account_name
+        
+        self.add_item(Button(
+            label="📝 Change Message",
+            style=discord.ButtonStyle.primary,
+            custom_id=f"edit_msg_{account_name}"
+        ))
+        
+        self.add_item(Button(
+            label="📋 Add Channels",
+            style=discord.ButtonStyle.primary,
+            custom_id=f"edit_channels_{account_name}"
+        ))
+        
+        self.add_item(Button(
+            label="⏱ Change Interval",
+            style=discord.ButtonStyle.primary,
+            custom_id=f"edit_interval_{account_name}"
+        ))
+        
+        self.add_item(Button(
+            label="⏳ Change Delay",
+            style=discord.ButtonStyle.primary,
+            custom_id=f"edit_delay_{account_name}"
+        ))
+        
+        self.add_item(Button(
+            label="🔙 Back",
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"back_account_{account_name}"
+        ))
+
+# =============================================================
+# PANEL EMBED BUILDER
+# =============================================================
+
+def create_panel_embed(account_name: str = None):
+    """Create the main panel embed."""
     embed = discord.Embed(
-        title=f"📋 {title}",
-        description=content,
-        color=color,
+        title="🚀 SendNow - Control Panel",
+        color=discord.Color.blue(),
         timestamp=datetime.datetime.now()
     )
-    embed.set_footer(text="developed by @yathishyt ⚡ | 30s Delay Mode")
+    
+    # Add stats
+    total_accounts = len(bot_data.get('accounts', {}))
+    running = sum(1 for acc in bot_data.get('accounts', {}).values() if acc.get('is_running', False))
+    total_sent = bot_data.get('total_sent', 0)
+    total_failed = bot_data.get('total_failed', 0)
+    total_channels = sum(len(acc.get('channels', [])) for acc in bot_data.get('accounts', {}).values())
+    
+    embed.add_field(
+        name="📊 Overview",
+        value=f"**Accounts:** {total_accounts} ({running} running)\n"
+              f"**Channels:** {total_channels}\n"
+              f"**Sent:** {total_sent} ✅ | **Failed:** {total_failed} ❌",
+        inline=False
+    )
+    
+    # List accounts with status
+    accounts_list = ""
+    for name, acc in bot_data.get('accounts', {}).items():
+        status = "🟢" if acc.get('is_running', False) else "🔴"
+        channels = len(acc.get('channels', []))
+        delay = acc.get('message_delay', DEFAULT_DELAY)
+        accounts_list += f"{status} **{name}** | {channels} channels | {delay}s delay\n"
+    
+    if accounts_list:
+        embed.add_field(
+            name="📋 Accounts",
+            value=accounts_list,
+            inline=False
+        )
+    else:
+        embed.add_field(
+            name="📋 Accounts",
+            value="*No accounts added yet.*\nUse `!addaccount` to get started.",
+            inline=False
+        )
+    
+    embed.set_footer(text="developed by @yathishyt ⚡ | Click buttons to manage accounts")
     return embed
 
-async def send_panel(ctx, title: str, content: str, success=None, color=None):
-    embed = create_panel(title, content, color, success)
-    try:
-        await ctx.send(embed=embed)
-    except Exception as e:
-        print(f"⚠️ Failed to send panel: {e}")
+def create_account_embed(account_name: str):
+    """Create an embed for a specific account."""
+    account_data = bot_data['accounts'].get(account_name, {})
+    
+    status = "🟢 Online" if account_data.get('is_running', False) else "🔴 Offline"
+    channels = len(account_data.get('channels', []))
+    delay = account_data.get('message_delay', DEFAULT_DELAY)
+    interval = account_data.get('schedule_interval', 1)
+    sent = account_data.get('sent_count', 0)
+    failed = account_data.get('failed_count', 0)
+    rounds = account_data.get('total_rounds', 0)
+    token_preview = account_data.get('token', '')[:20] + '...' if account_data.get('token') else 'Not set'
+    
+    embed = discord.Embed(
+        title=f"📋 {account_name}'s Acc Overview",
+        color=discord.Color.green() if account_data.get('is_running', False) else discord.Color.red(),
+        timestamp=datetime.datetime.now()
+    )
+    
+    embed.add_field(
+        name="📊 Account Status",
+        value=f"Status: {status} | Last Active: {rounds} rounds",
+        inline=False
+    )
+    
+    embed.add_field(
+        name="📡 Monitoring Details",
+        value=f"Total Channels: {channels} | Channel Delay: {delay}s | DM Mode: Disabled",
+        inline=False
+    )
+    
+    embed.add_field(
+        name="📈 Stats",
+        value=f"Sent: {sent} ✅ | Failed: {failed} ❌ | Rounds: {rounds}",
+        inline=False
+    )
+    
+    embed.add_field(
+        name="🔑 Token",
+        value=f"`{token_preview}`",
+        inline=False
+    )
+    
+    embed.set_footer(text=f"developed by @yathishyt ⚡ | {account_name}")
+    return embed
+
+def create_edit_embed(account_name: str):
+    """Create an embed for editing account."""
+    account_data = bot_data['accounts'].get(account_name, {})
+    
+    embed = discord.Embed(
+        title=f"✏️ Editing {account_name}",
+        color=discord.Color.blue(),
+        timestamp=datetime.datetime.now()
+    )
+    
+    embed.add_field(
+        name="📝 Current Settings",
+        value=f"**Message:** {account_data.get('message', 'Not set')[:100]}...\n"
+              f"**Channels:** {len(account_data.get('channels', []))}\n"
+              f"**Interval:** {account_data.get('schedule_interval', 1)} minutes\n"
+              f"**Delay:** {account_data.get('message_delay', DEFAULT_DELAY)}s",
+        inline=False
+    )
+    
+    embed.set_footer(text="developed by @yathishyt ⚡ | Click buttons below to edit")
+    return embed
 
 # =============================================================
 # TOKEN HANDLING
@@ -406,7 +587,7 @@ async def test_token(token: str):
                     data = await response.json()
                     return True, f"✅ {data.get('username')}#{data.get('discriminator', '0')}"
                 elif response.status == 401:
-                    return False, "❌ TOKEN EXPIRED - Get new one from Chrome"
+                    return False, "❌ TOKEN EXPIRED"
                 else:
                     return False, f"❌ HTTP {response.status}"
     except Exception as e:
@@ -429,7 +610,6 @@ async def send_single_message(channel_id: str, message: str, token: str, account
     
     if rate_limited.get(account_name, False) and time.time() < rate_limit_until.get(account_name, 0):
         wait_time = rate_limit_until[account_name] - time.time()
-        print(f"⏳ [{account_name}] Rate limited, waiting {wait_time:.2f}s...")
         await asyncio.sleep(wait_time + 1)
         rate_limited[account_name] = False
     
@@ -445,39 +625,24 @@ async def send_single_message(channel_id: str, message: str, token: str, account
                 elif response.status == 429:
                     data = await response.json()
                     retry_after = data.get('retry_after', 30)
-                    print(f"⚠️ [{account_name}] Rate limited! Waiting {retry_after:.2f}s...")
                     rate_limited[account_name] = True
                     rate_limit_until[account_name] = time.time() + retry_after + 2
                     await asyncio.sleep(retry_after + 2)
                     return await send_single_message(channel_id, message, token, account_name)
                 elif response.status == 401:
-                    print(f"❌ [{account_name}] TOKEN EXPIRED! Channel: {channel_id}")
-                    await log_failed_message(account_name, channel_id, "TOKEN EXPIRED - Get new token from Chrome")
-                    
+                    await log_failed_message(account_name, channel_id, "TOKEN EXPIRED")
                     if account_name in bot_data['accounts']:
                         bot_data['accounts'][account_name]['is_running'] = False
                         update_account(account_name, bot_data['accounts'][account_name])
                         save_data()
-                    
                     return False, "TOKEN EXPIRED"
                 elif response.status == 403:
-                    print(f"❌ [{account_name}] No permission in {channel_id}")
-                    await log_failed_message(account_name, channel_id, "No permission to send")
+                    await log_failed_message(account_name, channel_id, "No permission")
                     return False, "No permission"
-                elif response.status == 400:
-                    print(f"❌ [{account_name}] Bad request for {channel_id}")
-                    await log_failed_message(account_name, channel_id, "Bad request - message too long?")
-                    return False, "Bad request"
                 else:
-                    print(f"❌ [{account_name}] Failed: HTTP {response.status} on {channel_id}")
                     await log_failed_message(account_name, channel_id, f"HTTP {response.status}")
                     return False, f"HTTP {response.status}"
-    except asyncio.TimeoutError:
-        print(f"⏳ [{account_name}] Timeout on {channel_id}")
-        await log_failed_message(account_name, channel_id, "Timeout")
-        return False, "Timeout"
     except Exception as e:
-        print(f"❌ [{account_name}] Error on {channel_id}: {str(e)}")
         await log_failed_message(account_name, channel_id, str(e))
         return False, str(e)
 
@@ -488,7 +653,6 @@ async def send_round_for_account(account_name: str) -> dict:
         return {'sent': 0, 'failed': 0, 'account': account_name}
     
     account_data = bot_data['accounts'][account_name]
-    
     token = account_data.get('token')
     channels = account_data.get('channels', [])
     message = account_data.get('message')
@@ -496,35 +660,24 @@ async def send_round_for_account(account_name: str) -> dict:
     if not token or not channels or not message:
         return {'sent': 0, 'failed': 0, 'account': account_name}
     
-    # Check if token is expired before sending
     test_valid, _ = await test_token(token)
     if not test_valid:
-        print(f"❌ [{account_name}] Token expired! Stopping account.")
         account_data['is_running'] = False
         update_account(account_name, account_data)
         save_data()
         return {'sent': 0, 'failed': 0, 'account': account_name, 'error': 'Token expired'}
     
     message_delay = account_data.get('message_delay', DEFAULT_DELAY)
-    
-    print(f"📨 [{account_name}] Sending to {len(channels)} channels (delay: {message_delay}s)...")
-    
     sent = 0
     failed = 0
     
     for index, channel_id in enumerate(channels, 1):
-        print(f"  📤 [{account_name}] {channel_id}...")
         success, error = await send_single_message(channel_id, message, token, account_name)
-        
         if success:
             sent += 1
-            print(f"    ✅ [{account_name}] Sent!")
         else:
             failed += 1
-            print(f"    ❌ [{account_name}] Failed: {error}")
-        
         if index < len(channels):
-            print(f"  ⏳ [{account_name}] Waiting {message_delay}s before next message...")
             await asyncio.sleep(message_delay)
     
     account_data['sent_count'] = account_data.get('sent_count', 0) + sent
@@ -535,8 +688,6 @@ async def send_round_for_account(account_name: str) -> dict:
     
     update_account(account_name, account_data)
     save_data()
-    
-    print(f"  📊 [{account_name}] Round complete: ✅ {sent} sent | ❌ {failed} failed")
     
     return {'sent': sent, 'failed': failed, 'account': account_name}
 
@@ -549,20 +700,11 @@ async def send_round_for_all_accounts():
     if not running_accounts:
         return
     
-    print(f"\n🔄 Sending round for {len(running_accounts)} accounts simultaneously...")
-    print(f"⏳ Each account has {DEFAULT_DELAY}s delay between messages")
-    
     tasks = []
     for account_name in running_accounts:
         tasks.append(send_round_for_account(account_name))
     
     results = await asyncio.gather(*tasks)
-    
-    total_sent = sum(r.get('sent', 0) for r in results)
-    total_failed = sum(r.get('failed', 0) for r in results)
-    
-    print(f"  📊 Round complete: ✅ {total_sent} sent | ❌ {total_failed} failed\n")
-    
     return results
 
 async def log_failed_message(account_name: str, channel_id: str, reason: str):
@@ -596,11 +738,11 @@ async def log_failed_message(account_name: str, channel_id: str, reason: str):
         
         embed = discord.Embed(
             title=f"❌ [{account_name}] MESSAGE FAILED",
-            description=f"**Account:** `{account_name}`\n**Channel:** `{channel_id}`\n**Reason:** {reason}\n**Time:** {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            description=f"**Channel:** `{channel_id}`\n**Reason:** {reason}\n**Time:** {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
             color=discord.Color.red(),
             timestamp=datetime.datetime.now()
         )
-        embed.set_footer(text="developed by @yathishyt ⚡ | 30s Delay Mode")
+        embed.set_footer(text="developed by @yathishyt ⚡")
         await failed_channel.send(embed=embed)
         
     except Exception as e:
@@ -632,7 +774,7 @@ async def scheduled_send_task():
             await asyncio.sleep(10)
 
 # =============================================================
-# DISCORD BOT COMMANDS
+# DISCORD PANEL COMMANDS
 # =============================================================
 
 global_send_task = None
@@ -643,641 +785,338 @@ async def on_ready():
     
     print(f'✅ Bot online: {bot.user.name}')
     print(f'📡 Connected to {len(bot.guilds)} servers')
-    print(f'🗄️ Redis: {"Connected" if redis_manager.connected else "Disconnected (using JSON fallback)"}')
-    print(f'⏳ Default message delay: {DEFAULT_DELAY} seconds')
+    print(f'🗄️ Redis: {"Connected" if redis_manager.connected else "Disconnected"}')
     
     if global_send_task is None or global_send_task.done():
         global_send_task = asyncio.create_task(scheduled_send_task())
         print("✅ Global send task started")
 
-@bot.command(name='setdelay')
-async def set_delay(ctx, seconds: int):
-    global bot_data
-    
-    account_name = bot_data.get('active_account')
-    if not account_name or account_name not in bot_data['accounts']:
-        await send_panel(ctx, "SET DELAY", "❌ No active account! Use `!account <name>` first.", success=False)
-        return
-    
-    account_data = bot_data['accounts'][account_name]
-    
-    if seconds < 5:
-        await send_panel(ctx, "SET DELAY", "❌ Delay must be at least 5 seconds!", success=False)
-        return
-    
-    if seconds > 300:
-        await send_panel(ctx, "SET DELAY", "❌ Delay cannot exceed 300 seconds (5 minutes)!", success=False)
-        return
-    
-    account_data['message_delay'] = seconds
-    update_account(account_name, account_data)
-    save_data()
-    
-    await send_panel(ctx, "SET DELAY", 
-        f"✅ Delay set for `{account_name}`: **{seconds} seconds** between messages!", 
-        success=True)
+# =============================================================
+# DISCORD PANEL COMMANDS
+# =============================================================
 
-@bot.command(name='addaccount')
-async def add_account(ctx, account_name: str, *, token: str):
-    global bot_data
-    
-    if account_name in bot_data['accounts']:
-        await send_panel(ctx, "ADD ACCOUNT", f"❌ Account `{account_name}` already exists!", success=False)
-        return
-    
-    token = clean_token(token)
-    if not token:
-        await send_panel(ctx, "ADD ACCOUNT", "❌ Invalid token!", success=False)
-        return
-    
-    await send_panel(ctx, "ADD ACCOUNT", f"🔍 Testing token for `{account_name}`...", color=discord.Color.blue())
-    valid, result = await test_token(token)
-    
-    if not valid:
-        await send_panel(ctx, "ADD ACCOUNT", f"❌ {result}", success=False)
-        return
-    
-    account_data = DEFAULT_ACCOUNT.copy()
-    account_data['token'] = token
-    account_data['message_delay'] = DEFAULT_DELAY
-    bot_data['accounts'][account_name] = account_data
-    bot_data['active_account'] = account_name
-    
-    update_account(account_name, account_data)
-    save_data()
-    
-    await send_panel(ctx, "ADD ACCOUNT", 
-        f"✅ **Account Added!**\n📛 Name: `{account_name}`\n{result}\n\n"
-        f"⏳ Default delay: **{DEFAULT_DELAY}s** between messages", 
-        success=True)
-
-@bot.command(name='accounts')
-async def list_accounts(ctx):
-    global bot_data
-    
-    accounts = bot_data.get('accounts', {})
-    
-    if not accounts:
-        await send_panel(ctx, "ACCOUNTS", "📭 No accounts added.", success=False)
-        return
-    
-    content = "**📋 All Accounts:**\n\n"
-    for name, acc in accounts.items():
-        status = "🟢 Running" if acc.get('is_running', False) else "🔴 Stopped"
-        channels = len(acc.get('channels', []))
-        delay = acc.get('message_delay', DEFAULT_DELAY)
-        content += f"• **{name}**\n  └ Status: {status} | Channels: {channels} | Delay: {delay}s\n\n"
-    
-    content += f"\n🗄️ **Redis Storage:** {'Connected ✅' if redis_manager.connected else 'Disconnected ❌'}"
-    content += f"\n⏳ **Default Delay:** {DEFAULT_DELAY}s between messages"
-    await send_panel(ctx, "ACCOUNTS", content, success=True)
+@bot.command(name='panel')
+async def show_panel(ctx):
+    """Show the main control panel."""
+    embed = create_panel_embed()
+    view = MainPanelView()
+    await ctx.send(embed=embed, view=view)
 
 @bot.command(name='account')
-async def select_account(ctx, account_name: str):
-    global bot_data
-    
-    if account_name not in bot_data['accounts']:
-        await send_panel(ctx, "ACCOUNT", f"❌ Account `{account_name}` not found!", success=False)
+async def show_account(ctx, account_name: str = None):
+    """Show details for a specific account."""
+    if not account_name:
+        await ctx.send("❌ Please specify an account name: `!account <name>`")
         return
     
-    bot_data['active_account'] = account_name
-    save_data()
+    if account_name not in bot_data['accounts']:
+        await ctx.send(f"❌ Account `{account_name}` not found!")
+        return
     
-    account_data = bot_data['accounts'][account_name]
-    status = "🟢 Running" if account_data.get('is_running', False) else "🔴 Stopped"
-    delay = account_data.get('message_delay', DEFAULT_DELAY)
-    
-    content = f"""**Selected Account:** `{account_name}`
-Status: {status}
-Channels: {len(account_data.get('channels', []))}
-Interval: Every {account_data.get('schedule_interval', 1)} minute(s)
-Delay: {delay}s between messages
-Sent: {account_data.get('sent_count', 0)}
-Failed: {account_data.get('failed_count', 0)}
+    embed = create_account_embed(account_name)
+    view = AccountControlView(account_name)
+    await ctx.send(embed=embed, view=view)
 
-**🗄️ Redis Storage:** {'Connected ✅' if redis_manager.connected else 'Disconnected ❌'}
-"""
-    await send_panel(ctx, "ACCOUNT", content, success=True)
+@bot.command(name='addaccount')
+async def add_account_cmd(ctx, account_name: str = None, *, token: str = None):
+    """Add a new account."""
+    await ctx.send("📋 **Add Account**\n\nTo add an account, use this format:\n`!addaccount <name> <token>`\n\n**Example:**\n`!addaccount main mfa.xxxxxxxx`")
+    
+    # If parameters provided, proceed
+    if account_name and token:
+        if account_name in bot_data['accounts']:
+            await ctx.send(f"❌ Account `{account_name}` already exists!")
+            return
+        
+        token = clean_token(token)
+        if not token:
+            await ctx.send("❌ Invalid token!")
+            return
+        
+        valid, result = await test_token(token)
+        if not valid:
+            await ctx.send(f"❌ {result}")
+            return
+        
+        account_data = DEFAULT_ACCOUNT.copy()
+        account_data['token'] = token
+        bot_data['accounts'][account_name] = account_data
+        update_account(account_name, account_data)
+        save_data()
+        
+        embed = discord.Embed(
+            title="✅ Account Added!",
+            description=f"**Name:** `{account_name}`\n{result}\n\nUse `!panel` to view all accounts.",
+            color=discord.Color.green(),
+            timestamp=datetime.datetime.now()
+        )
+        embed.set_footer(text="developed by @yathishyt ⚡")
+        await ctx.send(embed=embed)
 
 @bot.command(name='removeaccount')
-async def remove_account(ctx, account_name: str):
-    global bot_data
-    
+async def remove_account_cmd(ctx, account_name: str):
+    """Remove an account."""
     if account_name not in bot_data['accounts']:
-        await send_panel(ctx, "REMOVE ACCOUNT", f"❌ Account `{account_name}` not found!", success=False)
+        await ctx.send(f"❌ Account `{account_name}` not found!")
         return
     
-    if bot_data['accounts'][account_name].get('is_running', False):
-        bot_data['accounts'][account_name]['is_running'] = False
-    
-    delete_account(account_name)
-    
-    if bot_data.get('active_account') == account_name:
-        bot_data['active_account'] = None
-    
-    save_data()
-    await send_panel(ctx, "REMOVE ACCOUNT", f"✅ Account `{account_name}` removed!", success=True)
-
-def get_active_account(ctx):
-    global bot_data
-    
-    account_name = bot_data.get('active_account')
-    if not account_name:
-        return None, "❌ No active account!\nUse `!account <name>` to select one."
-    
-    if account_name not in bot_data['accounts']:
-        return None, f"❌ Account `{account_name}` no longer exists!"
-    
-    return bot_data['accounts'][account_name], None
-
-@bot.command(name='addchannel')
-async def add_channel(ctx, *, channel_ids: str):
-    global bot_data
-    
-    account_data, error = get_active_account(ctx)
-    if not account_data:
-        await send_panel(ctx, "ADD CHANNEL", error, success=False)
-        return
-    
-    channel_list = []
-    for separator in [',', ';', ' ']:
-        if separator in channel_ids:
-            channel_list = [c.strip() for c in channel_ids.split(separator) if c.strip()]
-            break
-    
-    if not channel_list:
-        channel_list = [channel_ids.strip()]
-    
-    added = []
-    skipped = []
-    invalid = []
-    
-    for cid in channel_list:
-        if not cid.isdigit():
-            invalid.append(cid)
-            continue
-        
-        if cid in account_data.get('channels', []):
-            skipped.append(cid)
-            continue
-        
-        account_data['channels'].append(cid)
-        added.append(cid)
-    
-    account_name = bot_data.get('active_account')
-    update_account(account_name, account_data)
-    save_data()
-    
-    response_parts = []
-    if added:
-        response_parts.append(f"✅ Added: `{', '.join(added)}`")
-    if skipped:
-        response_parts.append(f"⚠️ Skipped (already exist): `{', '.join(skipped)}`")
-    if invalid:
-        response_parts.append(f"❌ Invalid: `{', '.join(invalid)}`")
-    
-    delay = account_data.get('message_delay', DEFAULT_DELAY)
-    response_parts.append(f"📊 Total channels: **{len(account_data['channels'])}**")
-    response_parts.append(f"⏳ Delay: **{delay}s** between messages")
-    
-    await send_panel(ctx, "ADD CHANNEL", "\n".join(response_parts), success=True if added else False)
-
-@bot.command(name='removechannel')
-async def remove_channel(ctx, *, channel_ids: str):
-    global bot_data
-    
-    account_data, error = get_active_account(ctx)
-    if not account_data:
-        await send_panel(ctx, "REMOVE CHANNEL", error, success=False)
-        return
-    
-    channel_list = []
-    for separator in [',', ';', ' ']:
-        if separator in channel_ids:
-            channel_list = [c.strip() for c in channel_ids.split(separator) if c.strip()]
-            break
-    
-    if not channel_list:
-        channel_list = [channel_ids.strip()]
-    
-    removed = []
-    not_found = []
-    
-    for cid in channel_list:
-        if cid in account_data.get('channels', []):
-            account_data['channels'].remove(cid)
-            removed.append(cid)
-        else:
-            not_found.append(cid)
-    
-    account_name = bot_data.get('active_account')
-    update_account(account_name, account_data)
-    save_data()
-    
-    response_parts = []
-    if removed:
-        response_parts.append(f"✅ Removed: `{', '.join(removed)}`")
-    if not_found:
-        response_parts.append(f"⚠️ Not found: `{', '.join(not_found)}`")
-    
-    response_parts.append(f"📊 Total channels: **{len(account_data['channels'])}**")
-    
-    await send_panel(ctx, "REMOVE CHANNEL", "\n".join(response_parts), success=True if removed else False)
-
-@bot.command(name='listchannels')
-async def list_channels(ctx):
-    global bot_data
-    
-    account_data, error = get_active_account(ctx)
-    if not account_data:
-        await send_panel(ctx, "LIST CHANNELS", error, success=False)
-        return
-    
-    channels = account_data.get('channels', [])
-    if not channels:
-        await send_panel(ctx, "LIST CHANNELS", f"📭 No channels added for `{bot_data.get('active_account')}`.", success=False)
-        return
-    
-    channel_list = []
-    for cid in channels:
-        try:
-            channel = bot.get_channel(int(cid))
-            if channel:
-                channel_list.append(f"• #{channel.name} (`{cid}`)")
-            else:
-                channel_list.append(f"• `{cid}` (unknown)")
-        except:
-            channel_list.append(f"• `{cid}`")
-    
-    delay = account_data.get('message_delay', DEFAULT_DELAY)
-    content = f"**Account:** `{bot_data.get('active_account')}`\n**Total:** {len(channels)}\n⏳ **Delay:** {delay}s\n\n" + "\n".join(channel_list)
-    await send_panel(ctx, "LIST CHANNELS", content, success=True)
-
-@bot.command(name='setmessage')
-async def set_message(ctx, *, message: str = None):
-    global bot_data
-    
-    account_data, error = get_active_account(ctx)
-    if not account_data:
-        await send_panel(ctx, "SET MESSAGE", error, success=False)
-        return
-    
-    if message is None:
-        if ctx.message.attachments:
-            for attachment in ctx.message.attachments:
-                if attachment.filename.endswith('.txt'):
-                    try:
-                        content = await attachment.read()
-                        message = content.decode('utf-8')
-                        break
-                    except Exception as e:
-                        await send_panel(ctx, "SET MESSAGE", f"❌ Error reading file: {str(e)}", success=False)
-                        return
-                else:
-                    await send_panel(ctx, "SET MESSAGE", "❌ Please attach a `.txt` file!", success=False)
-                    return
-        else:
-            await send_panel(ctx, "SET MESSAGE", 
-                "❌ Please provide a message or attach a `.txt` file!\n\n"
-                "**For long messages:**\n"
-                "1. Create `message.txt`\n"
-                "2. Type `!setmessage`\n"
-                "3. Attach the `.txt` file\n"
-                "4. Send", 
-                success=False)
-            return
-    
-    if len(message) > 4000:
-        await send_panel(ctx, "SET MESSAGE", f"❌ Message too long! Max 4000 characters. You have **{len(message)}** characters.", success=False)
-        return
-    
-    account_data['message'] = message
-    account_name = bot_data.get('active_account')
-    update_account(account_name, account_data)
-    save_data()
-    
-    preview = message[:150] + "..." if len(message) > 150 else message
-    await send_panel(ctx, "SET MESSAGE", 
-        f"✅ Message set for `{account_name}`!\n\n"
-        f"```\n{preview}\n```\n\n"
-        f"📊 **Length:** {len(message)} characters", 
-        success=True)
-
-@bot.command(name='setinterval')
-async def set_interval(ctx, minutes: int):
-    global bot_data
-    
-    account_data, error = get_active_account(ctx)
-    if not account_data:
-        await send_panel(ctx, "SET INTERVAL", error, success=False)
-        return
-    
-    if minutes < 1 or minutes > 60:
-        await send_panel(ctx, "SET INTERVAL", "❌ Must be 1-60 minutes!", success=False)
-        return
-    
-    account_data['schedule_interval'] = minutes
-    account_name = bot_data.get('active_account')
-    update_account(account_name, account_data)
-    save_data()
-    
-    await send_panel(ctx, "SET INTERVAL", 
-        f"✅ Interval set for `{account_name}`: Every **{minutes} minute(s)**", 
-        success=True)
-
-@bot.command(name='failed')
-async def set_failed_channel(ctx, channel_id: str):
-    global bot_data
-    
-    account_data, error = get_active_account(ctx)
-    if not account_data:
-        await send_panel(ctx, "SET FAILED CHANNEL", error, success=False)
-        return
-    
-    if not channel_id.isdigit():
-        await send_panel(ctx, "SET FAILED CHANNEL", "❌ Invalid channel ID!", success=False)
-        return
-    
-    try:
-        channel = bot.get_channel(int(channel_id))
-        if not channel:
-            await send_panel(ctx, "SET FAILED CHANNEL", "❌ Channel not found!", success=False)
-            return
-    except:
-        await send_panel(ctx, "SET FAILED CHANNEL", "❌ Invalid channel!", success=False)
-        return
-    
-    account_data['failed_channel_id'] = channel_id
-    account_name = bot_data.get('active_account')
-    update_account(account_name, account_data)
-    save_data()
-    
-    await send_panel(ctx, "SET FAILED CHANNEL", 
-        f"✅ Failed logs for `{account_name}` will go to `{channel_id}`", 
-        success=True)
-
-@bot.command(name='failedlogs')
-async def show_failed_logs(ctx):
-    global bot_data
-    
-    account_data, error = get_active_account(ctx)
-    if not account_data:
-        await send_panel(ctx, "FAILED LOGS", error, success=False)
-        return
-    
-    logs = account_data.get('failed_logs', [])
-    if not logs:
-        await send_panel(ctx, "FAILED LOGS", f"📭 No failed logs for `{bot_data.get('active_account')}`.", success=True)
-        return
-    
-    recent = logs[-10:]
-    content = f"**Account:** `{bot_data.get('active_account')}`\n\n" + "\n".join([
-        f"• `{l.get('timestamp', '')[:16]}` | Channel: `{l.get('channel_id')}` | {l.get('reason', 'Unknown')}"
-        for l in recent
-    ])
-    await send_panel(ctx, "FAILED LOGS", content, success=False)
+    delete_account_data(account_name)
+    await ctx.send(f"✅ Account `{account_name}` removed!")
 
 @bot.command(name='start')
-async def start_account(ctx):
-    global bot_data
+async def start_account_cmd(ctx, account_name: str = None):
+    """Start an account."""
+    if not account_name:
+        account_name = bot_data.get('active_account')
+        if not account_name:
+            await ctx.send("❌ Please specify an account: `!start <name>`")
+            return
     
-    account_name = bot_data.get('active_account')
-    if not account_name or account_name not in bot_data['accounts']:
-        await send_panel(ctx, "START", "❌ No active account! Use `!account <name>` first.", success=False)
+    if account_name not in bot_data['accounts']:
+        await ctx.send(f"❌ Account `{account_name}` not found!")
         return
     
     account_data = bot_data['accounts'][account_name]
     
     if not account_data.get('token'):
-        await send_panel(ctx, "START", "❌ No token set!", success=False)
+        await ctx.send(f"❌ Account `{account_name}` has no token set!")
         return
     if not account_data.get('channels'):
-        await send_panel(ctx, "START", "❌ No channels added!", success=False)
+        await ctx.send(f"❌ Account `{account_name}` has no channels added!")
         return
     if not account_data.get('message'):
-        await send_panel(ctx, "START", "❌ No message set!", success=False)
-        return
-    if account_data.get('is_running', False):
-        await send_panel(ctx, "START", "⚠️ Already running!", success=False)
+        await ctx.send(f"❌ Account `{account_name}` has no message set!")
         return
     
-    # Test token before starting
     valid, result = await test_token(account_data.get('token'))
     if not valid:
-        await send_panel(ctx, "START", f"❌ Token is invalid or expired!\n{result}\n\nGet a new token from Chrome and use `!settoken <new_token>`", success=False)
+        await ctx.send(f"❌ Token expired for `{account_name}`!\n{result}")
         return
     
     account_data['is_running'] = True
     account_data['sent_count'] = 0
     account_data['failed_count'] = 0
     account_data['total_rounds'] = 0
-    
     update_account(account_name, account_data)
     save_data()
     
-    running = [name for name, acc in bot_data['accounts'].items() if acc.get('is_running', False)]
-    delay = account_data.get('message_delay', DEFAULT_DELAY)
-    
-    await send_panel(ctx, "START", 
-        f"🚀 **Started `{account_name}`!**\n"
-        f"📊 Channels: {len(account_data['channels'])}\n"
-        f"⏱️ Interval: Every {account_data['schedule_interval']} minute(s)\n"
-        f"⏳ Delay: **{delay}s** between messages\n\n"
-        f"🔄 **Running accounts: {len(running)}**", 
-        success=True)
+    embed = discord.Embed(
+        title="🚀 Account Started!",
+        description=f"**Account:** `{account_name}`\n**Channels:** {len(account_data['channels'])}\n**Interval:** Every {account_data['schedule_interval']} minute(s)",
+        color=discord.Color.green(),
+        timestamp=datetime.datetime.now()
+    )
+    embed.set_footer(text="developed by @yathishyt ⚡")
+    await ctx.send(embed=embed)
 
 @bot.command(name='stop')
-async def stop_account(ctx):
-    global bot_data
+async def stop_account_cmd(ctx, account_name: str = None):
+    """Stop an account."""
+    if not account_name:
+        account_name = bot_data.get('active_account')
+        if not account_name:
+            await ctx.send("❌ Please specify an account: `!stop <name>`")
+            return
     
-    account_name = bot_data.get('active_account')
-    if not account_name or account_name not in bot_data['accounts']:
-        await send_panel(ctx, "STOP", "❌ No active account!", success=False)
+    if account_name not in bot_data['accounts']:
+        await ctx.send(f"❌ Account `{account_name}` not found!")
         return
     
     account_data = bot_data['accounts'][account_name]
-    
-    if not account_data.get('is_running', False):
-        await send_panel(ctx, "STOP", "⚠️ Not running!", success=False)
-        return
-    
     account_data['is_running'] = False
     update_account(account_name, account_data)
     save_data()
     
-    await send_panel(ctx, "STOP", 
-        f"🛑 **Stopped `{account_name}`!**\n"
-        f"✅ Sent: {account_data.get('sent_count', 0)}\n"
-        f"❌ Failed: {account_data.get('failed_count', 0)}", 
-        success=True)
+    embed = discord.Embed(
+        title="🛑 Account Stopped!",
+        description=f"**Account:** `{account_name}`\n**Sent:** {account_data.get('sent_count', 0)}\n**Failed:** {account_data.get('failed_count', 0)}",
+        color=discord.Color.red(),
+        timestamp=datetime.datetime.now()
+    )
+    embed.set_footer(text="developed by @yathishyt ⚡")
+    await ctx.send(embed=embed)
 
-@bot.command(name='sendnow')
-async def send_now(ctx):
-    global bot_data
+# =============================================================
+# BUTTON INTERACTIONS
+# =============================================================
+
+@bot.event
+async def on_interaction(interaction: discord.Interaction):
+    """Handle button interactions for the panel."""
     
-    running = [name for name, acc in bot_data['accounts'].items() if acc.get('is_running', False)]
-    
-    if not running:
-        await send_panel(ctx, "SEND NOW", "❌ No accounts running!", success=False)
+    if not interaction.data or not interaction.data.get('custom_id'):
         return
     
-    await send_panel(ctx, "SEND NOW", f"📨 Sending for **{len(running)} accounts**...\n⏳ {DEFAULT_DELAY}s delay between messages", color=discord.Color.blue())
+    custom_id = interaction.data['custom_id']
     
-    results = await send_round_for_all_accounts()
+    # ===== PANEL CONTROLS =====
     
-    total_sent = sum(r.get('sent', 0) for r in results) if results else 0
-    total_failed = sum(r.get('failed', 0) for r in results) if results else 0
-    
-    await send_panel(ctx, "SEND NOW", 
-        f"✅ Done!\n\n"
-        f"✅ Total Sent: **{total_sent}**\n"
-        f"❌ Total Failed: **{total_failed}**\n"
-        f"⏳ Delay used: **{DEFAULT_DELAY}s** between messages", 
-        success=True)
-
-@bot.command(name='startall')
-async def start_all_accounts(ctx):
-    global bot_data
-    
-    accounts = bot_data.get('accounts', {})
-    if not accounts:
-        await send_panel(ctx, "START ALL", "❌ No accounts found!", success=False)
+    if custom_id == 'refresh_panel':
+        embed = create_panel_embed()
+        await interaction.response.edit_message(embed=embed)
         return
     
-    started = 0
-    for name, acc in accounts.items():
-        if not acc.get('is_running', False):
-            if acc.get('token') and acc.get('channels') and acc.get('message'):
-                valid, _ = await test_token(acc.get('token'))
-                if valid:
-                    acc['is_running'] = True
-                    acc['sent_count'] = 0
-                    acc['failed_count'] = 0
-                    acc['total_rounds'] = 0
-                    started += 1
-                    update_account(name, acc)
-    
-    save_data()
-    
-    running = [name for name, acc in bot_data['accounts'].items() if acc.get('is_running', False)]
-    
-    await send_panel(ctx, "START ALL", 
-        f"🚀 **Started {started} accounts!**\n"
-        f"📊 Total Running: **{len(running)}**\n"
-        f"⏳ Delay: **{DEFAULT_DELAY}s** between messages", 
-        success=True)
-
-@bot.command(name='stopall')
-async def stop_all_accounts(ctx):
-    global bot_data
-    
-    accounts = bot_data.get('accounts', {})
-    stopped = 0
-    
-    for name, acc in accounts.items():
-        if acc.get('is_running', False):
-            acc['is_running'] = False
-            stopped += 1
-            update_account(name, acc)
-    
-    save_data()
-    
-    await send_panel(ctx, "STOP ALL", f"🛑 **Stopped {stopped} accounts!**", success=True)
-
-@bot.command(name='status')
-async def show_status(ctx):
-    global bot_data
-    
-    account_name = bot_data.get('active_account')
-    if not account_name or account_name not in bot_data['accounts']:
-        await send_panel(ctx, "STATUS", "❌ No active account! Use `!account <name>` first.", success=False)
+    if custom_id == 'add_account_panel':
+        embed = discord.Embed(
+            title="➕ Add Account",
+            description="Use the command:\n`!addaccount <name> <token>`\n\n**Example:**\n`!addaccount main mfa.xxxxxxxx`\n\n**Get token from Chrome:**\nF12 → Console → `localStorage.getItem('token')`",
+            color=discord.Color.blue(),
+            timestamp=datetime.datetime.now()
+        )
+        embed.set_footer(text="developed by @yathishyt ⚡")
+        await interaction.response.edit_message(embed=embed)
         return
     
-    account_data = bot_data['accounts'][account_name]
-    running = account_data.get('is_running', False)
-    all_running = [name for name, acc in bot_data['accounts'].items() if acc.get('is_running', False)]
-    delay = account_data.get('message_delay', DEFAULT_DELAY)
-    
-    content = f"""**Account:** `{account_name}`
-{"🟢" if running else "🔴"} Status: **{"Running" if running else "Stopped"}**
-👤 Token: `{account_data.get('token', 'Not set')[:20]}...`
-📋 Channels: {len(account_data.get('channels', []))}
-⏱️ Interval: Every {account_data.get('schedule_interval', 1)} minute(s)
-⏳ Delay: **{delay}s** between messages
-✅ Sent: {account_data.get('sent_count', 0)}
-❌ Failed: {account_data.get('failed_count', 0)}
-📊 Rounds: {account_data.get('total_rounds', 0)}
-
-**Global Stats:**
-🔄 Running: **{len(all_running)}**
-✅ Total Sent: {bot_data.get('total_sent', 0)}
-❌ Total Failed: {bot_data.get('total_failed', 0)}
-📋 Total Accounts: {len(bot_data.get('accounts', {}))}
-
-🗄️ Redis: {"Connected ✅" if redis_manager.connected else "Disconnected ❌"}"""
-    
-    await send_panel(ctx, "STATUS", content, success=running)
-
-@bot.command(name='clear')
-async def clear_settings(ctx):
-    global bot_data
-    
-    account_data, error = get_active_account(ctx)
-    if not account_data:
-        await send_panel(ctx, "CLEAR", error, success=False)
+    if custom_id == 'back_to_panel':
+        embed = create_panel_embed()
+        view = MainPanelView()
+        await interaction.response.edit_message(embed=embed, view=view)
         return
     
-    if account_data.get('is_running', False):
-        await send_panel(ctx, "CLEAR", "❌ Cannot clear while running!", success=False)
+    # ===== ACCOUNT CONTROLS =====
+    
+    if custom_id.startswith('start_'):
+        account_name = custom_id.replace('start_', '')
+        if account_name in bot_data['accounts']:
+            account_data = bot_data['accounts'][account_name]
+            
+            valid, result = await test_token(account_data.get('token'))
+            if not valid:
+                embed = discord.Embed(
+                    title="❌ Token Expired!",
+                    description=f"Token for `{account_name}` has expired.\nPlease add a new token.",
+                    color=discord.Color.red()
+                )
+                embed.set_footer(text="developed by @yathishyt ⚡")
+                await interaction.response.edit_message(embed=embed)
+                return
+            
+            account_data['is_running'] = True
+            update_account(account_name, account_data)
+            save_data()
+            
+            embed = create_account_embed(account_name)
+            view = AccountControlView(account_name)
+            await interaction.response.edit_message(embed=embed, view=view)
         return
     
-    for key in DEFAULT_ACCOUNT:
-        if key != 'token':
-            account_data[key] = DEFAULT_ACCOUNT[key]
+    if custom_id.startswith('stop_'):
+        account_name = custom_id.replace('stop_', '')
+        if account_name in bot_data['accounts']:
+            account_data = bot_data['accounts'][account_name]
+            account_data['is_running'] = False
+            update_account(account_name, account_data)
+            save_data()
+            
+            embed = create_account_embed(account_name)
+            view = AccountControlView(account_name)
+            await interaction.response.edit_message(embed=embed, view=view)
+        return
     
-    account_name = bot_data.get('active_account')
-    update_account(account_name, account_data)
-    save_data()
+    if custom_id.startswith('edit_'):
+        account_name = custom_id.replace('edit_', '')
+        if account_name in bot_data['accounts']:
+            embed = create_edit_embed(account_name)
+            view = EditAccountView(account_name)
+            await interaction.response.edit_message(embed=embed, view=view)
+        return
     
-    await send_panel(ctx, "CLEAR", f"🗑️ Settings cleared for `{account_name}`!", success=True)
-
-@bot.command(name='commands')
-async def show_commands(ctx):
-    content = """
-**📋 Multi-Account Commands (30s Delay Mode)**
-
-**Account Management:**
-`!addaccount <name> <token>` - Add new account
-`!accounts` - List all accounts
-`!account <name>` - Select active account
-`!removeaccount <name>` - Remove account
-
-**Configuration:**
-`!addchannel <id1,id2,id3>` - Add multiple channels
-`!removechannel <id1,id2,id3>` - Remove channels
-`!listchannels` - List channels
-`!setmessage <msg>` - Set message (or attach .txt)
-`!setinterval <min>` - Set interval (1-60 min)
-`!setdelay <seconds>` - Set delay between messages (5-300s)
-`!failed <channel_id>` - Set failed logs channel
-`!failedlogs` - Show failed logs
-
-**Control:**
-`!start` - Start active account
-`!stop` - Stop active account
-`!startall` - Start ALL accounts
-`!stopall` - Stop ALL accounts
-`!sendnow` - Send one round
-`!status` - Show status
-`!clear` - Clear settings
-
-**Other:**
-`!commands` - Show this menu
-
-**⚡ ALL running accounts send simultaneously!**
-**⏳ Default delay: 30 seconds between messages**
-**🗄️ All data stored in Redis**"""
-    await send_panel(ctx, "COMMANDS", content, color=discord.Color.blue())
+    if custom_id.startswith('delete_'):
+        account_name = custom_id.replace('delete_', '')
+        if account_name in bot_data['accounts']:
+            delete_account_data(account_name)
+            embed = create_panel_embed()
+            view = MainPanelView()
+            await interaction.response.edit_message(
+                content=f"🗑️ Account `{account_name}` deleted!",
+                embed=embed,
+                view=view
+            )
+        return
+    
+    if custom_id.startswith('stats_'):
+        account_name = custom_id.replace('stats_', '')
+        if account_name in bot_data['accounts']:
+            account_data = bot_data['accounts'][account_name]
+            embed = discord.Embed(
+                title=f"📊 Stats for {account_name}",
+                color=discord.Color.blue(),
+                timestamp=datetime.datetime.now()
+            )
+            embed.add_field(name="Sent", value=f"`{account_data.get('sent_count', 0)}`", inline=True)
+            embed.add_field(name="Failed", value=f"`{account_data.get('failed_count', 0)}`", inline=True)
+            embed.add_field(name="Rounds", value=f"`{account_data.get('total_rounds', 0)}`", inline=True)
+            embed.add_field(name="Channels", value=f"`{len(account_data.get('channels', []))}`", inline=True)
+            embed.add_field(name="Interval", value=f"`{account_data.get('schedule_interval', 1)} min`", inline=True)
+            embed.add_field(name="Delay", value=f"`{account_data.get('message_delay', DEFAULT_DELAY)}s`", inline=True)
+            
+            # Failed logs
+            logs = account_data.get('failed_logs', [])[-5:]
+            if logs:
+                log_text = ""
+                for log in logs:
+                    log_text += f"• `{log.get('timestamp', '')[:16]}` | {log.get('reason', 'Unknown')}\n"
+                embed.add_field(name="Recent Errors", value=log_text, inline=False)
+            else:
+                embed.add_field(name="Recent Errors", value="*No errors*", inline=False)
+            
+            embed.set_footer(text="developed by @yathishyt ⚡")
+            await interaction.response.edit_message(embed=embed)
+        return
+    
+    # ===== EDIT ACCOUNT BUTTONS =====
+    
+    if custom_id.startswith('edit_msg_'):
+        account_name = custom_id.replace('edit_msg_', '')
+        embed = discord.Embed(
+            title="📝 Change Message",
+            description=f"To change the message for `{account_name}`, use:\n`!setmessage <new message>`\n\n**Or attach a `.txt` file with:**\n`!setmessage`",
+            color=discord.Color.blue()
+        )
+        embed.set_footer(text="developed by @yathishyt ⚡")
+        await interaction.response.edit_message(embed=embed)
+        return
+    
+    if custom_id.startswith('edit_channels_'):
+        account_name = custom_id.replace('edit_channels_', '')
+        embed = discord.Embed(
+            title="📋 Add Channels",
+            description=f"To add channels to `{account_name}`, use:\n`!addchannel <id1,id2,id3>`\n\n**Example:**\n`!addchannel 123456789,987654321`",
+            color=discord.Color.blue()
+        )
+        embed.set_footer(text="developed by @yathishyt ⚡")
+        await interaction.response.edit_message(embed=embed)
+        return
+    
+    if custom_id.startswith('edit_interval_'):
+        account_name = custom_id.replace('edit_interval_', '')
+        embed = discord.Embed(
+            title="⏱ Change Interval",
+            description=f"To change the interval for `{account_name}`, use:\n`!setinterval <minutes>`\n\n**Example:**\n`!setinterval 5` (sends every 5 minutes)",
+            color=discord.Color.blue()
+        )
+        embed.set_footer(text="developed by @yathishyt ⚡")
+        await interaction.response.edit_message(embed=embed)
+        return
+    
+    if custom_id.startswith('edit_delay_'):
+        account_name = custom_id.replace('edit_delay_', '')
+        embed = discord.Embed(
+            title="⏳ Change Delay",
+            description=f"To change the delay between messages for `{account_name}`, use:\n`!setdelay <seconds>`\n\n**Example:**\n`!setdelay 30` (30 seconds between messages)",
+            color=discord.Color.blue()
+        )
+        embed.set_footer(text="developed by @yathishyt ⚡")
+        await interaction.response.edit_message(embed=embed)
+        return
+    
+    if custom_id.startswith('back_account_'):
+        account_name = custom_id.replace('back_account_', '')
+        if account_name in bot_data['accounts']:
+            embed = create_account_embed(account_name)
+            view = AccountControlView(account_name)
+            await interaction.response.edit_message(embed=embed, view=view)
+        return
 
 # =============================================================
 # ERROR HANDLING
@@ -1286,141 +1125,23 @@ async def show_commands(ctx):
 @bot.event
 async def on_command_error(ctx, error):
     if isinstance(error, commands.MissingRequiredArgument):
-        await send_panel(ctx, "ERROR", "❌ Missing argument! Use `!commands`", success=False)
+        await ctx.send("❌ Missing argument! Use `!commands` for help.")
     elif isinstance(error, commands.CommandNotFound):
         pass
     else:
-        await send_panel(ctx, "ERROR", f"❌ {str(error)}", success=False)
-
-# =============================================================
-# FLASK WEB SERVER (FOR PANEL)
-# =============================================================
-
-if FLASK_AVAILABLE:
-    panel_app = Flask(__name__)
-    panel_app.secret_key = os.environ.get('SECRET_KEY', 'dev-secret-key')
-    
-    # =============================================================
-    # PANEL API ENDPOINTS
-    # =============================================================
-    
-    @panel_app.route('/api/stats')
-    def api_stats():
-        global bot_data
-        accounts = bot_data.get('accounts', {})
-        running = sum(1 for acc in accounts.values() if acc.get('is_running', False))
-        stopped = len(accounts) - running
-        total_channels = sum(len(acc.get('channels', [])) for acc in accounts.values())
-        
-        return jsonify({
-            'total_accounts': len(accounts),
-            'running_accounts': running,
-            'stopped_accounts': stopped,
-            'total_sent': bot_data.get('total_sent', 0),
-            'total_failed': bot_data.get('total_failed', 0),
-            'total_channels': total_channels
-        })
-    
-    @panel_app.route('/api/accounts')
-    def api_accounts():
-        global bot_data
-        accounts = bot_data.get('accounts', {})
-        # Hide full tokens for security
-        for name, acc in accounts.items():
-            if acc.get('token'):
-                acc['token_preview'] = acc['token'][:20] + '...'
-        return jsonify({'accounts': accounts})
-    
-    @panel_app.route('/api/panel/start/<name>', methods=['POST'])
-    def panel_start(name):
-        global bot_data
-        if name in bot_data['accounts']:
-            # Test token before starting
-            async def test_and_start():
-                valid, _ = await test_token(bot_data['accounts'][name].get('token'))
-                if valid:
-                    bot_data['accounts'][name]['is_running'] = True
-                    update_account(name, bot_data['accounts'][name])
-                    save_data()
-                    return True
-                return False
-            
-            # Run async function
-            try:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                result = loop.run_until_complete(test_and_start())
-                loop.close()
-                if result:
-                    return jsonify({'status': 'success', 'message': f'Started {name}'})
-                else:
-                    return jsonify({'status': 'error', 'message': 'Token expired - get new token'}), 400
-            except:
-                return jsonify({'status': 'error', 'message': 'Failed to start'}), 500
-        return jsonify({'status': 'error', 'message': 'Account not found'}), 404
-    
-    @panel_app.route('/api/panel/stop/<name>', methods=['POST'])
-    def panel_stop(name):
-        global bot_data
-        if name in bot_data['accounts']:
-            bot_data['accounts'][name]['is_running'] = False
-            update_account(name, bot_data['accounts'][name])
-            save_data()
-            return jsonify({'status': 'success', 'message': f'Stopped {name}'})
-        return jsonify({'status': 'error', 'message': 'Account not found'}), 404
-    
-    @panel_app.route('/api/panel/delete/<name>', methods=['POST'])
-    def panel_delete(name):
-        global bot_data
-        if name in bot_data['accounts']:
-            delete_account(name)
-            return jsonify({'status': 'success', 'message': f'Deleted {name}'})
-        return jsonify({'status': 'error', 'message': 'Account not found'}), 404
-    
-    @panel_app.route('/api/panel/logs')
-    def panel_logs():
-        global bot_data
-        logs = []
-        for name, acc in bot_data.get('accounts', {}).items():
-            for log in acc.get('failed_logs', [])[-5:]:
-                logs.append({
-                    'account': name,
-                    'time': log.get('timestamp', '')[:16],
-                    'channel': log.get('channel_id', ''),
-                    'reason': log.get('reason', '')
-                })
-        return jsonify({'logs': logs[-20:]})
-    
-    def run_panel():
-        try:
-            port = int(os.environ.get('PANEL_PORT', 5000))
-            panel_app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
-        except Exception as e:
-            print(f"⚠️ Panel server error: {e}")
-    
-    def start_panel_server():
-        if FLASK_AVAILABLE:
-            thread = threading.Thread(target=run_panel, daemon=True)
-            thread.start()
-            print(f"🌐 Web Panel starting on port {os.environ.get('PANEL_PORT', 5000)}")
-        else:
-            print("⚠️ Flask not installed - panel disabled")
+        await ctx.send(f"❌ Error: {str(error)}")
 
 # =============================================================
 # MAIN
 # =============================================================
 
 def main():
-    print("🚀 Starting Multi-Account Bot (30s Delay Mode)...")
-    print(f"🗄️ Redis: {'Connected' if redis_manager.connected else 'Disconnected (JSON fallback)'}")
-    print(f"⏳ Default delay: {DEFAULT_DELAY} seconds between messages")
-    
-    # Start the web panel in background
-    if FLASK_AVAILABLE:
-        start_panel_server()
+    print("🚀 Starting Discord Panel Bot...")
+    print(f"🗄️ Redis: {'Connected' if redis_manager.connected else 'Disconnected'}")
+    print(f"⏳ Default delay: {DEFAULT_DELAY} seconds")
     
     if not BOT_TOKEN:
-        print("❌ No BOT_TOKEN found! Set in Railway Variables")
+        print("❌ No BOT_TOKEN found!")
         return
     
     try:
