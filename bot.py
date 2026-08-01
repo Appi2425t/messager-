@@ -2,14 +2,9 @@
 # =============================================================
 # DISCORD BOT - SIMULTANEOUS MULTI-ACCOUNT MESSENGER (REDIS)
 # =============================================================
-# - ALL accounts send messages at the SAME TIME
-# - Each account has independent channels/message/schedule
-# - True parallel sending using asyncio.gather()
-# - Redis database for persistent storage (Railway compatible)
-# - Support for long messages via .txt file upload
-# - Add multiple channels at once (comma-separated)
-# - Failed logs per account
-# - Professional panel replies with developer credit
+# - FIXED: Rate limiting handling with proper delays
+# - FIXED: Redis NoneType error
+# - FIXED: Message sending with retry backoff
 # =============================================================
 
 import discord
@@ -22,6 +17,7 @@ import aiohttp
 import datetime
 import sys
 import redis
+import random
 
 try:
     from flask import Flask, request, jsonify
@@ -44,14 +40,11 @@ class RedisManager:
     def connect(self):
         """Connect to Redis using Railway environment variables."""
         try:
-            # Get Redis URL from Railway environment
             redis_url = os.environ.get('REDIS_URL', '')
             
             if redis_url:
-                # Use the Redis URL directly
                 self.client = redis.from_url(redis_url, decode_responses=True)
             else:
-                # Fallback to individual variables
                 redis_host = os.environ.get('REDIS_HOST', 'localhost')
                 redis_port = int(os.environ.get('REDIS_PORT', 6379))
                 redis_password = os.environ.get('REDIS_PASSWORD', '')
@@ -65,11 +58,9 @@ class RedisManager:
                     decode_responses=True
                 )
             
-            # Test connection
             self.client.ping()
             self.connected = True
             print("✅ Redis connected successfully!")
-            print(f"📊 Redis DB: {self.client.info('server')['redis_version']}")
             return True
             
         except Exception as e:
@@ -79,7 +70,6 @@ class RedisManager:
             return False
     
     def get(self, key: str):
-        """Get value from Redis."""
         if not self.connected:
             return None
         try:
@@ -89,10 +79,12 @@ class RedisManager:
             return None
     
     def set(self, key: str, value):
-        """Set value in Redis."""
         if not self.connected:
             return False
         try:
+            # Skip None values
+            if value is None:
+                return False
             if isinstance(value, (dict, list)):
                 value = json.dumps(value)
             self.client.set(key, value)
@@ -102,7 +94,6 @@ class RedisManager:
             return False
     
     def delete(self, key: str):
-        """Delete key from Redis."""
         if not self.connected:
             return False
         try:
@@ -113,7 +104,6 @@ class RedisManager:
             return False
     
     def keys(self, pattern: str = '*'):
-        """Get all keys matching pattern."""
         if not self.connected:
             return []
         try:
@@ -123,10 +113,12 @@ class RedisManager:
             return []
     
     def hset(self, name: str, key: str, value):
-        """Set hash field."""
         if not self.connected:
             return False
         try:
+            # Skip None values
+            if value is None:
+                return False
             if isinstance(value, (dict, list)):
                 value = json.dumps(value)
             self.client.hset(name, key, value)
@@ -136,7 +128,6 @@ class RedisManager:
             return False
     
     def hget(self, name: str, key: str):
-        """Get hash field."""
         if not self.connected:
             return None
         try:
@@ -146,17 +137,16 @@ class RedisManager:
             return None
     
     def hgetall(self, name: str):
-        """Get all hash fields."""
         if not self.connected:
             return {}
         try:
-            return self.client.hgetall(name)
+            result = self.client.hgetall(name)
+            return result if result else {}
         except Exception as e:
             print(f"⚠️ Redis hgetall error: {e}")
             return {}
     
     def hdel(self, name: str, key: str):
-        """Delete hash field."""
         if not self.connected:
             return False
         try:
@@ -167,10 +157,11 @@ class RedisManager:
             return False
     
     def lpush(self, name: str, value):
-        """Push to list."""
         if not self.connected:
             return False
         try:
+            if value is None:
+                return False
             if isinstance(value, (dict, list)):
                 value = json.dumps(value)
             self.client.lpush(name, value)
@@ -180,7 +171,6 @@ class RedisManager:
             return False
     
     def lrange(self, name: str, start: int = 0, end: int = -1):
-        """Get list range."""
         if not self.connected:
             return []
         try:
@@ -190,7 +180,6 @@ class RedisManager:
             return []
     
     def ltrim(self, name: str, start: int, end: int):
-        """Trim list."""
         if not self.connected:
             return False
         try:
@@ -201,7 +190,6 @@ class RedisManager:
             return False
     
     def incr(self, key: str):
-        """Increment counter."""
         if not self.connected:
             return 0
         try:
@@ -210,44 +198,34 @@ class RedisManager:
             print(f"⚠️ Redis incr error: {e}")
             return 0
 
-# Initialize Redis
 redis_manager = RedisManager()
 
 # =============================================================
 # DATA MANAGEMENT WITH REDIS
 # =============================================================
 
-# Redis keys
 KEY_ACCOUNTS = 'bot:accounts'
 KEY_ACTIVE_ACCOUNT = 'bot:active_account'
 KEY_TOTAL_SENT = 'bot:total_sent'
 KEY_TOTAL_FAILED = 'bot:total_failed'
 KEY_ACCOUNT_PREFIX = 'bot:account:'
-KEY_LOGS_PREFIX = 'bot:logs:'
-KEY_STATS = 'bot:stats'
 
 def load_data():
-    """Load data from Redis."""
+    """Load data from Redis with proper None handling."""
     try:
         if not redis_manager.connected:
-            return {}
+            return {'accounts': {}, 'active_account': None, 'total_sent': 0, 'total_failed': 0}
         
-        # Get accounts list
         accounts_raw = redis_manager.get(KEY_ACCOUNTS)
         accounts = json.loads(accounts_raw) if accounts_raw else {}
         
-        # Get active account
         active_account = redis_manager.get(KEY_ACTIVE_ACCOUNT)
-        
-        # Get totals
         total_sent = int(redis_manager.get(KEY_TOTAL_SENT) or 0)
         total_failed = int(redis_manager.get(KEY_TOTAL_FAILED) or 0)
         
-        # Load each account's full data
         for account_name in list(accounts.keys()):
             account_data = redis_manager.hgetall(f"{KEY_ACCOUNT_PREFIX}{account_name}")
             if account_data:
-                # Parse JSON fields
                 for key, value in account_data.items():
                     try:
                         if key in ['channels', 'failed_logs']:
@@ -272,32 +250,28 @@ def load_data():
         return {'accounts': {}, 'active_account': None, 'total_sent': 0, 'total_failed': 0}
 
 def save_data(data):
-    """Save data to Redis."""
+    """Save data to Redis with proper None handling."""
     try:
         if not redis_manager.connected:
             return False
         
-        # Save accounts list (names only)
         accounts = data.get('accounts', {})
         redis_manager.set(KEY_ACCOUNTS, json.dumps(accounts))
-        
-        # Save active account
-        redis_manager.set(KEY_ACTIVE_ACCOUNT, data.get('active_account', ''))
-        
-        # Save totals
+        redis_manager.set(KEY_ACTIVE_ACCOUNT, data.get('active_account', '') or '')
         redis_manager.set(KEY_TOTAL_SENT, data.get('total_sent', 0))
         redis_manager.set(KEY_TOTAL_FAILED, data.get('total_failed', 0))
         
-        # Save each account's full data
         for account_name, account_data in accounts.items():
-            hash_key = f"{KEY_ACCOUNT_PREFIX}{account_name}"
-            for field, value in account_data.items():
-                if isinstance(value, (dict, list)):
-                    redis_manager.hset(hash_key, field, json.dumps(value))
-                elif isinstance(value, bool):
-                    redis_manager.hset(hash_key, field, str(value))
-                else:
-                    redis_manager.hset(hash_key, field, str(value) if value is not None else '')
+            if account_data:
+                hash_key = f"{KEY_ACCOUNT_PREFIX}{account_name}"
+                for field, value in account_data.items():
+                    if value is not None:
+                        if isinstance(value, (dict, list)):
+                            redis_manager.hset(hash_key, field, json.dumps(value))
+                        elif isinstance(value, bool):
+                            redis_manager.hset(hash_key, field, str(value))
+                        else:
+                            redis_manager.hset(hash_key, field, str(value))
         
         return True
         
@@ -311,14 +285,18 @@ def update_account(account_name: str, account_data: dict):
         if not redis_manager.connected:
             return False
         
+        if not account_data:
+            return False
+        
         hash_key = f"{KEY_ACCOUNT_PREFIX}{account_name}"
         for field, value in account_data.items():
-            if isinstance(value, (dict, list)):
-                redis_manager.hset(hash_key, field, json.dumps(value))
-            elif isinstance(value, bool):
-                redis_manager.hset(hash_key, field, str(value))
-            else:
-                redis_manager.hset(hash_key, field, str(value) if value is not None else '')
+            if value is not None:
+                if isinstance(value, (dict, list)):
+                    redis_manager.hset(hash_key, field, json.dumps(value))
+                elif isinstance(value, bool):
+                    redis_manager.hset(hash_key, field, str(value))
+                else:
+                    redis_manager.hset(hash_key, field, str(value))
         
         return True
         
@@ -335,7 +313,6 @@ def delete_account(account_name: str):
         hash_key = f"{KEY_ACCOUNT_PREFIX}{account_name}"
         redis_manager.delete(hash_key)
         
-        # Remove from accounts list
         accounts_raw = redis_manager.get(KEY_ACCOUNTS)
         accounts = json.loads(accounts_raw) if accounts_raw else {}
         if account_name in accounts:
@@ -349,7 +326,7 @@ def delete_account(account_name: str):
         return False
 
 # =============================================================
-# WEB SERVER (Keeps Railway Active)
+# WEB SERVER
 # =============================================================
 
 if FLASK_AVAILABLE:
@@ -359,13 +336,6 @@ if FLASK_AVAILABLE:
     @app.route('/health')
     def healthcheck():
         return "Bot is running!", 200
-    
-    @app.route('/redis-status')
-    def redis_status():
-        return jsonify({
-            'status': 'connected' if redis_manager.connected else 'disconnected',
-            'redis_version': redis_manager.client.info('server')['redis_version'] if redis_manager.connected else None
-        })
     
     def run_web_server():
         try:
@@ -417,7 +387,6 @@ redis_manager.connect()
 # Load initial data
 data = load_data()
 
-# Ensure default structure
 if 'accounts' not in data:
     data['accounts'] = {}
 if 'active_account' not in data:
@@ -504,7 +473,7 @@ async def test_token(token: str):
         return False, f"❌ Error: {str(e)}"
 
 # =============================================================
-# SEND MESSAGE FUNCTIONS
+# SEND MESSAGE FUNCTIONS (FIXED)
 # =============================================================
 
 async def send_single_message(channel_id: str, message: str, token: str, account_name: str) -> tuple:
@@ -517,12 +486,17 @@ async def send_single_message(channel_id: str, message: str, token: str, account
         rate_limit_until[account_name] = 0
     
     if rate_limited.get(account_name, False) and time.time() < rate_limit_until.get(account_name, 0):
-        await asyncio.sleep(rate_limit_until[account_name] - time.time())
+        wait_time = rate_limit_until[account_name] - time.time()
+        print(f"⏳ Rate limited, waiting {wait_time:.2f}s...")
+        await asyncio.sleep(wait_time + 0.5)
         rate_limited[account_name] = False
     
     url = f"https://discord.com/api/v9/channels/{channel_id}/messages"
     headers = {'Authorization': token, 'Content-Type': 'application/json'}
     payload = {'content': message, 'tts': False}
+    
+    # Random small delay to avoid rate limits
+    await asyncio.sleep(random.uniform(0.2, 0.5))
     
     try:
         async with aiohttp.ClientSession() as session:
@@ -532,47 +506,67 @@ async def send_single_message(channel_id: str, message: str, token: str, account
                 elif response.status == 429:
                     data = await response.json()
                     retry_after = data.get('retry_after', 5)
+                    print(f"⚠️ Rate limited! Waiting {retry_after:.2f}s...")
                     rate_limited[account_name] = True
-                    rate_limit_until[account_name] = time.time() + retry_after
-                    await asyncio.sleep(retry_after)
+                    rate_limit_until[account_name] = time.time() + retry_after + 1
+                    await asyncio.sleep(retry_after + 1)
                     return await send_single_message(channel_id, message, token, account_name)
+                elif response.status == 403:
+                    print(f"❌ No permission to send in channel {channel_id}")
+                    return False, "No permission"
+                elif response.status == 400:
+                    print(f"❌ Bad request - message too long?")
+                    return False, "Bad request"
                 else:
-                    error_msg = f"HTTP {response.status}"
-                    await log_failed_message(account_name, channel_id, error_msg)
-                    return False, error_msg
+                    print(f"❌ Failed: HTTP {response.status}")
+                    await log_failed_message(account_name, channel_id, f"HTTP {response.status}")
+                    return False, f"HTTP {response.status}"
+    except asyncio.TimeoutError:
+        print(f"⏳ Timeout for channel {channel_id}")
+        await log_failed_message(account_name, channel_id, "Timeout")
+        return False, "Timeout"
     except Exception as e:
-        error_msg = str(e)
-        await log_failed_message(account_name, channel_id, error_msg)
-        return False, error_msg
+        print(f"❌ Error: {str(e)}")
+        await log_failed_message(account_name, channel_id, str(e))
+        return False, str(e)
 
 async def send_round_for_account(account_name: str) -> dict:
     global data
     
     account_data = data['accounts'].get(account_name)
     if not account_data:
-        return {'sent': 0, 'failed': 0}
+        return {'sent': 0, 'failed': 0, 'account': account_name}
     
     token = account_data.get('token')
     channels = account_data.get('channels', [])
     message = account_data.get('message')
     
     if not token or not channels or not message:
-        return {'sent': 0, 'failed': 0}
+        return {'sent': 0, 'failed': 0, 'account': account_name}
+    
+    # Add delay between channels to avoid rate limits
+    delay_between = max(0.5, 1.5 - (len(channels) * 0.05))
+    delay_between = max(0.3, delay_between)
+    
+    print(f"📨 Sending to {len(channels)} channels for {account_name} (delay: {delay_between:.2f}s)...")
     
     sent = 0
     failed = 0
     
-    tasks = []
     for channel_id in channels:
-        tasks.append(send_single_message(channel_id, message, token, account_name))
-    
-    results = await asyncio.gather(*tasks)
-    
-    for success, error in results:
+        print(f"  📤 {account_name} → {channel_id}...")
+        success, error = await send_single_message(channel_id, message, token, account_name)
+        
         if success:
             sent += 1
+            print(f"    ✅ Sent!")
         else:
             failed += 1
+            print(f"    ❌ Failed: {error}")
+        
+        # Delay between channel sends
+        if len(channels) > 1:
+            await asyncio.sleep(delay_between)
     
     account_data['sent_count'] = account_data.get('sent_count', 0) + sent
     account_data['failed_count'] = account_data.get('failed_count', 0) + failed
@@ -580,9 +574,10 @@ async def send_round_for_account(account_name: str) -> dict:
     data['total_sent'] = data.get('total_sent', 0) + sent
     data['total_failed'] = data.get('total_failed', 0) + failed
     
-    # Save to Redis
     update_account(account_name, account_data)
     save_data(data)
+    
+    print(f"  📊 {account_name}: ✅ {sent} sent | ❌ {failed} failed")
     
     return {'sent': sent, 'failed': failed, 'account': account_name}
 
@@ -606,7 +601,7 @@ async def send_round_for_all_accounts():
     total_sent = sum(r.get('sent', 0) for r in results)
     total_failed = sum(r.get('failed', 0) for r in results)
     
-    print(f"  📊 Round complete: ✅ {total_sent} sent | ❌ {total_failed} failed")
+    print(f"  📊 Round complete: ✅ {total_sent} sent | ❌ {total_failed} failed\n")
     
     return results
 
@@ -633,10 +628,9 @@ async def log_failed_message(account_name: str, channel_id: str, reason: str):
             'channel_id': channel_id,
             'reason': reason
         })
-        if len(account_data['failed_logs']) > 100:
-            account_data['failed_logs'] = account_data['failed_logs'][-100:]
+        if len(account_data['failed_logs']) > 50:
+            account_data['failed_logs'] = account_data['failed_logs'][-50:]
         
-        # Save to Redis
         update_account(account_name, account_data)
         
         embed = discord.Embed(
@@ -658,7 +652,7 @@ async def scheduled_send_task():
         try:
             running = any(acc.get('is_running', False) for acc in data['accounts'].values())
             if not running:
-                await asyncio.sleep(1)
+                await asyncio.sleep(5)
                 continue
             
             await send_round_for_all_accounts()
@@ -677,7 +671,7 @@ async def scheduled_send_task():
             await asyncio.sleep(10)
 
 # =============================================================
-# BOT COMMANDS
+# BOT COMMANDS (Keep existing commands)
 # =============================================================
 
 global_send_task = None
@@ -694,7 +688,9 @@ async def on_ready():
         global_send_task = asyncio.create_task(scheduled_send_task())
         print("✅ Global send task started")
 
-# -------- ACCOUNT MANAGEMENT --------
+# =============================================================
+# ALL COMMANDS (Same as before - keep them)
+# =============================================================
 
 @bot.command(name='addaccount')
 async def add_account(ctx, account_name: str, *, token: str):
@@ -721,14 +717,12 @@ async def add_account(ctx, account_name: str, *, token: str):
     data['accounts'][account_name] = account_data
     data['active_account'] = account_name
     
-    # Save to Redis
     update_account(account_name, account_data)
     save_data(data)
     
     await send_panel(ctx, "ADD ACCOUNT", 
         f"✅ **Account Added!**\n📛 Name: `{account_name}`\n{result}\n\n"
-        f"🗄️ Data stored in Redis\n"
-        f"Use `!account {account_name}` to configure it.", 
+        f"🗄️ Data stored in Redis", 
         success=True)
 
 @bot.command(name='accounts')
@@ -743,7 +737,6 @@ async def list_accounts(ctx):
     for name, acc in accounts.items():
         status = "🟢 Running" if acc.get('is_running', False) else "🔴 Stopped"
         channels = len(acc.get('channels', []))
-        token_preview = acc.get('token', 'Not set')[:20] + '...' if acc.get('token') else 'Not set'
         content += f"• **{name}**\n  └ Status: {status} | Channels: {channels}\n\n"
     
     content += f"\n🗄️ **Redis Storage:** {'Connected ✅' if redis_manager.connected else 'Disconnected ❌'}"
@@ -771,12 +764,6 @@ Sent: {account_data.get('sent_count', 0)}
 Failed: {account_data.get('failed_count', 0)}
 
 **🗄️ Redis Storage:** {'Connected ✅' if redis_manager.connected else 'Disconnected ❌'}
-
-**Commands now apply to this account:**
-`!addchannel <id1,id2,id3>` - Add multiple channels
-`!setmessage <msg>` - Set message (or attach .txt file)
-`!start` - Start this account
-`!stop` - Stop this account
 """
     await send_panel(ctx, "ACCOUNT", content, success=True)
 
@@ -791,7 +778,6 @@ async def remove_account(ctx, account_name: str):
     if data['accounts'][account_name].get('is_running', False):
         data['accounts'][account_name]['is_running'] = False
     
-    # Delete from Redis
     delete_account(account_name)
     del data['accounts'][account_name]
     
@@ -799,9 +785,7 @@ async def remove_account(ctx, account_name: str):
         data['active_account'] = None
     
     save_data(data)
-    await send_panel(ctx, "REMOVE ACCOUNT", f"✅ Account `{account_name}` removed from Redis!", success=True)
-
-# -------- ACCOUNT CONFIGURATION --------
+    await send_panel(ctx, "REMOVE ACCOUNT", f"✅ Account `{account_name}` removed!", success=True)
 
 def get_active_account(ctx):
     global data
@@ -847,7 +831,6 @@ async def add_channel(ctx, *, channel_ids: str):
         account_data['channels'].append(cid)
         added.append(cid)
     
-    # Save to Redis
     update_account(data['active_account'], account_data)
     save_data(data)
     
@@ -860,7 +843,6 @@ async def add_channel(ctx, *, channel_ids: str):
         response_parts.append(f"❌ Invalid: `{', '.join(invalid)}`")
     
     response_parts.append(f"📊 Total channels: **{len(account_data['channels'])}**")
-    response_parts.append(f"🗄️ Saved to Redis ✅")
     
     await send_panel(ctx, "ADD CHANNEL", "\n".join(response_parts), success=True if added else False)
 
@@ -890,7 +872,6 @@ async def remove_channel(ctx, *, channel_ids: str):
         else:
             not_found.append(cid)
     
-    # Save to Redis
     update_account(data['active_account'], account_data)
     save_data(data)
     
@@ -901,7 +882,6 @@ async def remove_channel(ctx, *, channel_ids: str):
         response_parts.append(f"⚠️ Not found: `{', '.join(not_found)}`")
     
     response_parts.append(f"📊 Total channels: **{len(account_data['channels'])}**")
-    response_parts.append(f"🗄️ Saved to Redis ✅")
     
     await send_panel(ctx, "REMOVE CHANNEL", "\n".join(response_parts), success=True if removed else False)
 
@@ -955,7 +935,7 @@ async def set_message(ctx, *, message: str = None):
         else:
             await send_panel(ctx, "SET MESSAGE", 
                 "❌ Please provide a message or attach a `.txt` file!\n\n"
-                "**For long messages with newlines, use:**\n"
+                "**For long messages:**\n"
                 "1. Create `message.txt`\n"
                 "2. Type `!setmessage`\n"
                 "3. Attach the `.txt` file\n"
@@ -968,8 +948,6 @@ async def set_message(ctx, *, message: str = None):
         return
     
     account_data['message'] = message
-    
-    # Save to Redis
     update_account(data['active_account'], account_data)
     save_data(data)
     
@@ -977,8 +955,7 @@ async def set_message(ctx, *, message: str = None):
     await send_panel(ctx, "SET MESSAGE", 
         f"✅ Message set for `{data['active_account']}`!\n\n"
         f"```\n{preview}\n```\n\n"
-        f"📊 **Length:** {len(message)} characters\n"
-        f"🗄️ Saved to Redis ✅", 
+        f"📊 **Length:** {len(message)} characters", 
         success=True)
 
 @bot.command(name='setinterval')
@@ -993,14 +970,11 @@ async def set_interval(ctx, minutes: int):
         return
     
     account_data['schedule_interval'] = minutes
-    
-    # Save to Redis
     update_account(data['active_account'], account_data)
     save_data(data)
     
     await send_panel(ctx, "SET INTERVAL", 
-        f"✅ Interval set for `{data['active_account']}`: Every **{minutes} minute(s)**\n"
-        f"🗄️ Saved to Redis ✅", 
+        f"✅ Interval set for `{data['active_account']}`: Every **{minutes} minute(s)**", 
         success=True)
 
 @bot.command(name='failed')
@@ -1024,14 +998,11 @@ async def set_failed_channel(ctx, channel_id: str):
         return
     
     account_data['failed_channel_id'] = channel_id
-    
-    # Save to Redis
     update_account(data['active_account'], account_data)
     save_data(data)
     
     await send_panel(ctx, "SET FAILED CHANNEL", 
-        f"✅ Failed logs for `{data['active_account']}` will go to `{channel_id}`\n"
-        f"🗄️ Saved to Redis ✅", 
+        f"✅ Failed logs for `{data['active_account']}` will go to `{channel_id}`", 
         success=True)
 
 @bot.command(name='failedlogs')
@@ -1064,7 +1035,7 @@ async def start_account(ctx):
         return
     
     if not account_data.get('token'):
-        await send_panel(ctx, "START", "❌ No token set for this account!", success=False)
+        await send_panel(ctx, "START", "❌ No token set!", success=False)
         return
     if not account_data.get('channels'):
         await send_panel(ctx, "START", "❌ No channels added!", success=False)
@@ -1081,7 +1052,6 @@ async def start_account(ctx):
     account_data['failed_count'] = 0
     account_data['total_rounds'] = 0
     
-    # Save to Redis
     update_account(account_name, account_data)
     save_data(data)
     
@@ -1091,8 +1061,7 @@ async def start_account(ctx):
         f"🚀 **Started `{account_name}`!**\n"
         f"📊 Channels: {len(account_data['channels'])}\n"
         f"⏱️ Interval: Every {account_data['schedule_interval']} minute(s)\n\n"
-        f"🔄 **All running accounts ({len(running)}) will send simultaneously!**\n"
-        f"🗄️ Data saved to Redis ✅", 
+        f"🔄 **Running accounts: {len(running)}**", 
         success=True)
 
 @bot.command(name='stop')
@@ -1110,8 +1079,6 @@ async def stop_account(ctx):
         return
     
     account_data['is_running'] = False
-    
-    # Save to Redis
     update_account(account_name, account_data)
     save_data(data)
     
@@ -1128,10 +1095,10 @@ async def send_now(ctx):
     running = [name for name, acc in data['accounts'].items() if acc.get('is_running', False)]
     
     if not running:
-        await send_panel(ctx, "SEND NOW", "❌ No accounts are running!\nStart at least one account with `!start`", success=False)
+        await send_panel(ctx, "SEND NOW", "❌ No accounts running!", success=False)
         return
     
-    await send_panel(ctx, "SEND NOW", f"📨 Sending one round for **{len(running)} accounts** simultaneously...", color=discord.Color.blue())
+    await send_panel(ctx, "SEND NOW", f"📨 Sending for **{len(running)} accounts**...", color=discord.Color.blue())
     
     results = await send_round_for_all_accounts()
     
@@ -1139,10 +1106,9 @@ async def send_now(ctx):
     total_failed = sum(r.get('failed', 0) for r in results) if results else 0
     
     await send_panel(ctx, "SEND NOW", 
-        f"✅ Done! **{len(running)} accounts** sent simultaneously!\n\n"
+        f"✅ Done!\n\n"
         f"✅ Total Sent: **{total_sent}**\n"
-        f"❌ Total Failed: **{total_failed}**\n"
-        f"🗄️ Data saved to Redis ✅", 
+        f"❌ Total Failed: **{total_failed}**", 
         success=True)
 
 @bot.command(name='startall')
@@ -1171,9 +1137,7 @@ async def start_all_accounts(ctx):
     
     await send_panel(ctx, "START ALL", 
         f"🚀 **Started {started} accounts!**\n"
-        f"📊 Total Running: **{len(running)}**\n"
-        f"🔄 All accounts will send simultaneously!\n"
-        f"🗄️ Data saved to Redis ✅", 
+        f"📊 Total Running: **{len(running)}**", 
         success=True)
 
 @bot.command(name='stopall')
@@ -1191,10 +1155,7 @@ async def stop_all_accounts(ctx):
     
     save_data(data)
     
-    await send_panel(ctx, "STOP ALL", 
-        f"🛑 **Stopped {stopped} accounts!**\n"
-        f"🗄️ Data saved to Redis ✅", 
-        success=True)
+    await send_panel(ctx, "STOP ALL", f"🛑 **Stopped {stopped} accounts!**", success=True)
 
 @bot.command(name='status')
 async def show_status(ctx):
@@ -1215,15 +1176,13 @@ async def show_status(ctx):
 ✅ Sent: {account_data.get('sent_count', 0)}
 ❌ Failed: {account_data.get('failed_count', 0)}
 📊 Rounds: {account_data.get('total_rounds', 0)}
-📋 Failed Logs: `{account_data.get('failed_channel_id', 'Not set')}`
 
 **Global Stats:**
-🔄 Running Accounts: **{len(all_running)}**
+🔄 Running: **{len(all_running)}**
 ✅ Total Sent: {data.get('total_sent', 0)}
 ❌ Total Failed: {data.get('total_failed', 0)}
 📋 Total Accounts: {len(data.get('accounts', {}))}
 
-**⚡ All running accounts send SIMULTANEOUSLY!**
 🗄️ Redis: {"Connected ✅" if redis_manager.connected else "Disconnected ❌"}"""
     
     await send_panel(ctx, "STATUS", content, success=running)
@@ -1236,21 +1195,17 @@ async def clear_settings(ctx):
         return
     
     if account_data.get('is_running', False):
-        await send_panel(ctx, "CLEAR", "❌ Cannot clear while running! Use `!stop`", success=False)
+        await send_panel(ctx, "CLEAR", "❌ Cannot clear while running!", success=False)
         return
     
     for key in DEFAULT_ACCOUNT:
         if key != 'token':
             account_data[key] = DEFAULT_ACCOUNT[key]
     
-    # Save to Redis
     update_account(data['active_account'], account_data)
     save_data(data)
     
-    await send_panel(ctx, "CLEAR", 
-        f"🗑️ Settings cleared for `{data['active_account']}`!\n"
-        f"🗄️ Data updated in Redis ✅", 
-        success=True)
+    await send_panel(ctx, "CLEAR", f"🗑️ Settings cleared for `{data['active_account']}`!", success=True)
 
 @bot.command(name='commands')
 async def show_commands(ctx):
@@ -1263,11 +1218,11 @@ async def show_commands(ctx):
 `!account <name>` - Select active account
 `!removeaccount <name>` - Remove account
 
-**Account Configuration (applies to active account):**
+**Configuration:**
 `!addchannel <id1,id2,id3>` - Add multiple channels
-`!removechannel <id1,id2,id3>` - Remove multiple channels
+`!removechannel <id1,id2,id3>` - Remove channels
 `!listchannels` - List channels
-`!setmessage <msg>` - Set message (or attach .txt file)
+`!setmessage <msg>` - Set message (or attach .txt)
 `!setinterval <min>` - Set interval (1-60 min)
 `!failed <channel_id>` - Set failed logs channel
 `!failedlogs` - Show failed logs
@@ -1284,8 +1239,8 @@ async def show_commands(ctx):
 **Other:**
 `!commands` - Show this menu
 
-**⚡ ALL running accounts send SIMULTANEOUSLY!**
-**🗄️ All data stored in Redis database**"""
+**⚡ All running accounts send simultaneously!**
+**🗄️ All data stored in Redis**"""
     await send_panel(ctx, "COMMANDS", content, color=discord.Color.blue())
 
 # =============================================================
