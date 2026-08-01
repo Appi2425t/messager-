@@ -4,6 +4,8 @@
 # =============================================================
 # Accepts ANY token format from Chrome (bot, user, OTA, mfa., etc.)
 # Uses the token EXACTLY as provided - NO prefix added
+# Failed messages logged to a dedicated channel
+# All replies in panel style with developer credit
 # =============================================================
 
 import discord
@@ -33,7 +35,9 @@ DEFAULT_SETTINGS = {
     'sent_count': 0,
     'failed_count': 0,
     'last_send_time': None,
-    'total_rounds': 0
+    'total_rounds': 0,
+    'failed_channel_id': None,  # Channel ID for failed message logs
+    'failed_logs': []  # List of failed attempts
 }
 
 # =============================================================
@@ -75,6 +79,91 @@ rate_limited = False
 rate_limit_until = 0
 
 # =============================================================
+# PANEL REPLY HELPER
+# =============================================================
+
+def create_panel(title: str, content: str, color: discord.Color = discord.Color.blue(), success: bool = None) -> discord.Embed:
+    """Create a professional panel-style embed."""
+    if success is True:
+        color = discord.Color.green()
+    elif success is False:
+        color = discord.Color.red()
+    
+    embed = discord.Embed(
+        title=f"📋 {title}",
+        description=content,
+        color=color,
+        timestamp=datetime.datetime.now()
+    )
+    
+    # Add footer with developer credit
+    embed.set_footer(
+        text="developed by @yathishyt ⚡",
+        icon_url="https://cdn.discordapp.com/attachments/.../developer_icon.png"  # Optional
+    )
+    
+    # Add border effect
+    embed.add_field(name="═" + "─" * 48 + "╒", value="", inline=False)
+    
+    return embed
+
+async def send_panel(ctx, title: str, content: str, color: discord.Color = discord.Color.blue(), success: bool = None, channel=None):
+    """Send a panel-style message to a channel."""
+    embed = create_panel(title, content, color, success)
+    if channel:
+        await channel.send(embed=embed)
+    else:
+        await ctx.send(embed=embed)
+
+# =============================================================
+# FAILED LOG HELPER
+# =============================================================
+
+async def log_failed_message(channel_id: str, reason: str, token_preview: str = None):
+    """Log a failed message to the configured failed channel."""
+    global user_data
+    
+    failed_channel_id = user_data.get('failed_channel_id')
+    if not failed_channel_id:
+        return
+    
+    try:
+        failed_channel = bot.get_channel(int(failed_channel_id))
+        if not failed_channel:
+            return
+        
+        # Create log entry
+        log_entry = {
+            'timestamp': datetime.datetime.now().isoformat(),
+            'channel_id': channel_id,
+            'reason': reason,
+            'token_preview': token_preview
+        }
+        
+        # Store in data
+        if 'failed_logs' not in user_data:
+            user_data['failed_logs'] = []
+        user_data['failed_logs'].append(log_entry)
+        
+        # Keep only last 100 logs
+        if len(user_data['failed_logs']) > 100:
+            user_data['failed_logs'] = user_data['failed_logs'][-100:]
+        save_data(user_data)
+        
+        # Send panel to failed channel
+        embed = discord.Embed(
+            title="❌ MESSAGE FAILED",
+            description=f"**Channel ID:** `{channel_id}`\n**Reason:** {reason}\n**Time:** {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            color=discord.Color.red(),
+            timestamp=datetime.datetime.now()
+        )
+        embed.set_footer(text="developed by @yathishyt ⚡")
+        await failed_channel.send(embed=embed)
+        
+    except Exception as e:
+        print(f"Error logging failed message: {e}")
+
+# =============================================================
 # TOKEN HANDLING - ACCEPTS ANY FORMAT
 # =============================================================
 
@@ -83,22 +172,16 @@ def clean_token(token: str) -> str:
     if not token:
         return None
     
-    # Remove whitespace
     token = token.strip()
     
-    # Remove quotes if present
     if token.startswith('"') and token.endswith('"'):
         token = token[1:-1]
     if token.startswith("'") and token.endswith("'"):
         token = token[1:-1]
     
-    # Remove any other quote-like characters
     token = token.replace('"', '').replace("'", '').replace('`', '')
-    
-    # Remove any extra spaces
     token = token.replace(' ', '')
     
-    # Remove "Bot " prefix if someone accidentally adds it
     if token.lower().startswith('bot '):
         token = token[4:]
     
@@ -109,12 +192,10 @@ async def test_token(token: str):
     if not token or len(token) < 10:
         return False, "Token too short"
     
-    # Clean the token
     token = clean_token(token)
     
     url = "https://discord.com/api/v9/users/@me"
     
-    # Use the token AS-IS - NO prefix added
     headers = {
         'Authorization': token,
         'Content-Type': 'application/json',
@@ -129,9 +210,8 @@ async def test_token(token: str):
                     username = data.get('username', 'Unknown')
                     user_id = data.get('id', 'Unknown')
                     discrim = data.get('discriminator', '0000')
-                    return True, f"✅ Valid token! Logged in as: {username}#{discrim} ({user_id})"
+                    return True, f"✅ Valid token! Logged in as: `{username}#{discrim}` (`{user_id}`)"
                 elif response.status == 401:
-                    # Try with "Bot " prefix for bot tokens
                     try:
                         headers2 = {
                             'Authorization': f'Bot {token}',
@@ -143,10 +223,10 @@ async def test_token(token: str):
                                 data = await response2.json()
                                 username = data.get('username', 'Unknown')
                                 user_id = data.get('id', 'Unknown')
-                                return True, f"✅ Valid Bot token! Logged in as: {username}#{data.get('discriminator', '0000')} ({user_id})"
+                                return True, f"✅ Valid Bot token! Logged in as: `{username}#{data.get('discriminator', '0000')}` (`{user_id}`)"
                     except:
                         pass
-                    return False, "❌ Invalid token! Make sure you copied it correctly from Chrome."
+                    return False, "❌ Invalid token! Please check and try again."
                 else:
                     return False, f"❌ Error: HTTP {response.status}"
     except Exception as e:
@@ -154,7 +234,7 @@ async def test_token(token: str):
 
 async def send_message_with_token(channel_id: str, message: str, token: str) -> bool:
     """Send a message using ANY token format."""
-    global rate_limited, rate_limit_until
+    global rate_limited, rate_limit_until, user_data
     
     if not token or len(token) < 10:
         print(f"❌ Invalid token!")
@@ -170,7 +250,6 @@ async def send_message_with_token(channel_id: str, message: str, token: str) -> 
     
     url = f"https://discord.com/api/v9/channels/{channel_id}/messages"
     
-    # Use token AS-IS - NO prefix added
     headers = {
         'Authorization': token,
         'Content-Type': 'application/json',
@@ -197,7 +276,6 @@ async def send_message_with_token(channel_id: str, message: str, token: str) -> 
                     await asyncio.sleep(retry_after)
                     return await send_message_with_token(channel_id, message, token)
                 elif response.status == 401:
-                    # Try with "Bot " prefix for bot tokens
                     try:
                         headers2 = {
                             'Authorization': f'Bot {token}',
@@ -209,16 +287,21 @@ async def send_message_with_token(channel_id: str, message: str, token: str) -> 
                                 return True
                     except:
                         pass
-                    print(f"❌ Invalid token! (HTTP 401)")
+                    # Log the failed attempt
+                    await log_failed_message(channel_id, "Invalid token or unauthorized (HTTP 401)", token[:20])
+                    print(f"❌ Invalid token! (HTTP 401) - Channel: {channel_id}")
                     return False
                 elif response.status == 403:
-                    print(f"❌ No permission to send in this channel")
+                    await log_failed_message(channel_id, "No permission to send in this channel", token[:20])
+                    print(f"❌ No permission to send in channel: {channel_id}")
                     return False
                 else:
-                    print(f"❌ Failed: HTTP {response.status}")
+                    await log_failed_message(channel_id, f"HTTP {response.status} - {response.text[:100]}", token[:20])
+                    print(f"❌ Failed: HTTP {response.status} - Channel: {channel_id}")
                     return False
     except Exception as e:
-        print(f"❌ Error: {str(e)}")
+        await log_failed_message(channel_id, f"Error: {str(e)}", token[:20])
+        print(f"❌ Error: {str(e)} - Channel: {channel_id}")
         return False
 
 async def send_one_round():
@@ -256,7 +339,7 @@ async def send_one_round():
             print(f"    ✅ Sent!")
         else:
             failed += 1
-            print(f"    ❌ Failed")
+            print(f"    ❌ Failed - Logged to #failed channel")
         
         await asyncio.sleep(1)
     
@@ -336,6 +419,8 @@ async def on_ready():
     print(f'  !clear - Clear settings')
     print(f'  !commands - Show all commands')
     print(f'  !sendnow - Send one round')
+    print(f'  !failed <channel_id> - Set failed logs channel')
+    print(f'  !failedlogs - Show recent failed logs')
     
     if user_data.get('is_running', False):
         print(f"\n⚠️ Previous session found! Restarting...")
@@ -348,34 +433,29 @@ async def set_token(ctx, *, token: str):
     """Set ANY token from Chrome (bot, user, OTA, mfa., etc.)."""
     global user_data
     
-    # Clean the token
     token = clean_token(token)
     
     if len(token) < 10:
-        await ctx.send("❌ Token too short! Make sure you copied the full token.")
+        await send_panel(ctx, "SET TOKEN", "❌ **Token too short!**\nMake sure you copied the full token from Chrome.", success=False)
         return
     
-    # Test the token
-    await ctx.send(f"🔍 Testing token... Please wait.")
+    await send_panel(ctx, "SET TOKEN", "🔍 **Testing token...**\nPlease wait while we validate your token.", color=discord.Color.blue())
     
     valid, test_result = await test_token(token)
     
     if not valid:
-        await ctx.send(f"❌ {test_result}\n"
-                       "Make sure you copied the token correctly from Chrome.")
+        await send_panel(ctx, "SET TOKEN", f"❌ **{test_result}**\n\nMake sure you copied the token correctly from Chrome:\n1. Press F12 → Application\n2. Local Storage → https://discord.com\n3. Find 'token' key\n4. Copy the value", success=False)
         return
     
-    # Save the token
     user_data['user_token'] = token
     user_data['sent_count'] = 0
     user_data['failed_count'] = 0
     user_data['total_rounds'] = 0
     
     if save_data(user_data):
-        await ctx.send(f"✅ {test_result}\n"
-                       f"📝 Token saved: `{token[:20]}...`")
+        await send_panel(ctx, "SET TOKEN", f"✅ **{test_result}**\n\n📝 **Token saved:** `{token[:20]}...`\n\nNow use `!addchannel <id>` to add channels and `!start` to begin sending.", success=True)
     else:
-        await ctx.send("❌ Failed to save token!")
+        await send_panel(ctx, "SET TOKEN", "❌ **Failed to save token!**\nPlease try again.", success=False)
 
 @bot.command(name='testtoken')
 async def test_token_cmd(ctx):
@@ -383,17 +463,17 @@ async def test_token_cmd(ctx):
     token = user_data.get('user_token')
     
     if not token:
-        await ctx.send("❌ No token set! Use `!settoken <token>` first.")
+        await send_panel(ctx, "TEST TOKEN", "❌ **No token set!**\nUse `!settoken <token>` first.", success=False)
         return
     
-    await ctx.send("🔍 Testing token... Please wait.")
+    await send_panel(ctx, "TEST TOKEN", "🔍 **Testing token...**\nPlease wait.", color=discord.Color.blue())
     
     valid, result = await test_token(token)
     
     if valid:
-        await ctx.send(f"✅ {result}")
+        await send_panel(ctx, "TEST TOKEN", f"✅ **{result}**\n\nToken is valid and working correctly.", success=True)
     else:
-        await ctx.send(f"❌ {result}")
+        await send_panel(ctx, "TEST TOKEN", f"❌ **{result}**\n\nPlease set a new token using `!settoken <token>`", success=False)
 
 @bot.command(name='addchannel')
 async def add_channel(ctx, channel_id: str):
@@ -401,11 +481,11 @@ async def add_channel(ctx, channel_id: str):
     global user_data
     
     if not channel_id.isdigit():
-        await ctx.send("❌ Invalid channel ID! Must be a number.")
+        await send_panel(ctx, "ADD CHANNEL", f"❌ **Invalid channel ID!**\n`{channel_id}` is not a valid number.\n\nChannel IDs are numeric, e.g., `123456789012345678`", success=False)
         return
     
     if channel_id in user_data['channels']:
-        await ctx.send(f"⚠️ Channel {channel_id} already in list!")
+        await send_panel(ctx, "ADD CHANNEL", f"⚠️ **Channel already in list!**\n`{channel_id}` is already added.", success=False)
         return
     
     user_data['channels'].append(channel_id)
@@ -414,11 +494,11 @@ async def add_channel(ctx, channel_id: str):
     try:
         channel = bot.get_channel(int(channel_id))
         if channel:
-            await ctx.send(f"✅ Added: #{channel.name} (`{channel_id}`)")
+            await send_panel(ctx, "ADD CHANNEL", f"✅ **Channel added!**\n#{channel.name} (`{channel_id}`)\n\nTotal channels: **{len(user_data['channels'])}**", success=True)
         else:
-            await ctx.send(f"✅ Added channel ID: `{channel_id}`")
+            await send_panel(ctx, "ADD CHANNEL", f"✅ **Channel ID added!**\n`{channel_id}`\n\n⚠️ Bot may not be in this server.\nTotal channels: **{len(user_data['channels'])}**", success=True)
     except:
-        await ctx.send(f"✅ Added channel ID: `{channel_id}`")
+        await send_panel(ctx, "ADD CHANNEL", f"✅ **Channel ID added!**\n`{channel_id}`\n\nTotal channels: **{len(user_data['channels'])}**", success=True)
 
 @bot.command(name='removechannel')
 async def remove_channel(ctx, channel_id: str):
@@ -428,9 +508,9 @@ async def remove_channel(ctx, channel_id: str):
     if channel_id in user_data['channels']:
         user_data['channels'].remove(channel_id)
         save_data(user_data)
-        await ctx.send(f"✅ Removed: `{channel_id}`")
+        await send_panel(ctx, "REMOVE CHANNEL", f"✅ **Channel removed!**\n`{channel_id}`\n\nTotal channels: **{len(user_data['channels'])}**", success=True)
     else:
-        await ctx.send(f"⚠️ Channel `{channel_id}` not found!")
+        await send_panel(ctx, "REMOVE CHANNEL", f"⚠️ **Channel not found!**\n`{channel_id}` is not in the list.", success=False)
 
 @bot.command(name='listchannels')
 async def list_channels(ctx):
@@ -438,7 +518,7 @@ async def list_channels(ctx):
     channels = user_data.get('channels', [])
     
     if not channels:
-        await ctx.send("📭 No channels added. Use `!addchannel <id>`")
+        await send_panel(ctx, "LIST CHANNELS", "📭 **No channels added.**\nUse `!addchannel <id>` to add one.", success=False)
         return
     
     channel_list = []
@@ -446,14 +526,14 @@ async def list_channels(ctx):
         try:
             channel = bot.get_channel(int(cid))
             if channel:
-                channel_list.append(f"#{channel.name} (`{cid}`)")
+                channel_list.append(f"• #{channel.name} (`{cid}`)")
             else:
-                channel_list.append(f"`{cid}` (unknown)")
+                channel_list.append(f"• `{cid}` (unknown)")
         except:
-            channel_list.append(f"`{cid}`")
+            channel_list.append(f"• `{cid}`")
     
-    response = f"📋 **Channels ({len(channel_list)}):**\n" + "\n".join(f"• {ch}" for ch in channel_list)
-    await ctx.send(response)
+    content = "**Total Channels:** " + str(len(channel_list)) + "\n\n" + "\n".join(channel_list)
+    await send_panel(ctx, "LIST CHANNELS", content, success=True)
 
 @bot.command(name='setmessage')
 async def set_message(ctx, *, message: str):
@@ -461,14 +541,14 @@ async def set_message(ctx, *, message: str):
     global user_data
     
     if len(message) > 2000:
-        await ctx.send("❌ Message too long! Max 2000 characters.")
+        await send_panel(ctx, "SET MESSAGE", f"❌ **Message too long!**\nMaximum 2000 characters. You have **{len(message)}** characters.", success=False)
         return
     
     user_data['message'] = message
     save_data(user_data)
     
     preview = message[:100] + "..." if len(message) > 100 else message
-    await ctx.send(f"✅ Message set!\n```\n{preview}\n```")
+    await send_panel(ctx, "SET MESSAGE", f"✅ **Message set!**\n\n```\n{preview}\n```\n\nLength: **{len(message)}** characters", success=True)
 
 @bot.command(name='setinterval')
 async def set_interval(ctx, minutes: int):
@@ -476,17 +556,77 @@ async def set_interval(ctx, minutes: int):
     global user_data
     
     if minutes < 1:
-        await ctx.send("❌ Interval must be at least 1 minute!")
+        await send_panel(ctx, "SET INTERVAL", "❌ **Invalid interval!**\nInterval must be at least **1 minute**.", success=False)
         return
     
     if minutes > 60:
-        await ctx.send("❌ Interval must be 60 minutes or less!")
+        await send_panel(ctx, "SET INTERVAL", "❌ **Invalid interval!**\nInterval must be **60 minutes or less**.", success=False)
         return
     
     user_data['schedule_interval'] = minutes
     save_data(user_data)
     
-    await ctx.send(f"✅ Interval: **{minutes} minute(s)**")
+    await send_panel(ctx, "SET INTERVAL", f"✅ **Interval set!**\nMessages will send every **{minutes} minute(s)**", success=True)
+
+@bot.command(name='failed')
+async def set_failed_channel(ctx, channel_id: str):
+    """Set the channel for failed message logs."""
+    global user_data
+    
+    if not channel_id.isdigit():
+        await send_panel(ctx, "SET FAILED CHANNEL", f"❌ **Invalid channel ID!**\n`{channel_id}` is not a valid number.", success=False)
+        return
+    
+    # Check if the channel exists
+    try:
+        channel = bot.get_channel(int(channel_id))
+        if not channel:
+            await send_panel(ctx, "SET FAILED CHANNEL", f"❌ **Channel not found!**\nBot cannot see channel `{channel_id}`.\nMake sure the bot is in that server.", success=False)
+            return
+    except:
+        await send_panel(ctx, "SET FAILED CHANNEL", f"❌ **Invalid channel!**\nCould not find channel `{channel_id}`.", success=False)
+        return
+    
+    user_data['failed_channel_id'] = channel_id
+    save_data(user_data)
+    
+    # Send test message to the failed channel
+    try:
+        failed_channel = bot.get_channel(int(channel_id))
+        embed = discord.Embed(
+            title="✅ FAILED LOGS CHANNEL SET",
+            description="All failed message attempts will be logged here.\n\n**Status:** Ready\n**Time:** " + datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            color=discord.Color.green(),
+            timestamp=datetime.datetime.now()
+        )
+        embed.set_footer(text="developed by @yathishyt ⚡")
+        await failed_channel.send(embed=embed)
+    except:
+        pass
+    
+    await send_panel(ctx, "SET FAILED CHANNEL", f"✅ **Failed logs channel set!**\nChannel ID: `{channel_id}`\n\nAll failed message attempts will be logged there.", success=True)
+
+@bot.command(name='failedlogs')
+async def show_failed_logs(ctx):
+    """Show recent failed logs."""
+    logs = user_data.get('failed_logs', [])
+    
+    if not logs:
+        await send_panel(ctx, "FAILED LOGS", "📭 **No failed logs.**\nAll messages have been sent successfully so far.", success=True)
+        return
+    
+    # Get last 10 logs
+    recent = logs[-10:]
+    
+    log_lines = []
+    for log in recent:
+        timestamp = log.get('timestamp', 'Unknown time')[:16]
+        channel_id = log.get('channel_id', 'Unknown')
+        reason = log.get('reason', 'Unknown')
+        log_lines.append(f"• `{timestamp}` | Channel: `{channel_id}` | Reason: {reason}")
+    
+    content = "**Recent Failed Attempts (Last 10):**\n\n" + "\n".join(log_lines)
+    await send_panel(ctx, "FAILED LOGS", content, color=discord.Color.orange(), success=False if logs else True)
 
 @bot.command(name='start')
 async def start_sending(ctx):
@@ -494,22 +634,23 @@ async def start_sending(ctx):
     global user_data, sending_task
     
     if not user_data.get('user_token'):
-        await ctx.send("❌ No token set! Use `!settoken <token>`")
+        await send_panel(ctx, "START", "❌ **No token set!**\nUse `!settoken <token>` first.", success=False)
         return
     
     if not user_data.get('channels'):
-        await ctx.send("❌ No channels! Use `!addchannel <id>`")
+        await send_panel(ctx, "START", "❌ **No channels added!**\nUse `!addchannel <id>` to add one.", success=False)
         return
     
     if not user_data.get('message'):
-        await ctx.send("❌ No message! Use `!setmessage <message>`")
+        await send_panel(ctx, "START", "❌ **No message set!**\nUse `!setmessage <message>` first.", success=False)
         return
     
     if user_data.get('is_running', False):
-        await ctx.send("⚠️ Already running! Use `!stop`")
+        await send_panel(ctx, "START", "⚠️ **Already running!**\nUse `!stop` to stop first.", success=False)
         return
     
     interval = user_data.get('schedule_interval', 1)
+    failed_channel = user_data.get('failed_channel_id', 'Not set')
     
     user_data['sent_count'] = 0
     user_data['failed_count'] = 0
@@ -518,9 +659,7 @@ async def start_sending(ctx):
     user_data['start_time'] = datetime.datetime.now().isoformat()
     save_data(user_data)
     
-    await ctx.send(f"🚀 **Started!**\n"
-                   f"📊 Channels: {len(user_data['channels'])}\n"
-                   f"⏱️ Interval: Every {interval} minute(s)")
+    await send_panel(ctx, "START", f"🚀 **Started scheduled sending!**\n\n📊 **Channels:** {len(user_data['channels'])}\n⏱️ **Interval:** Every {interval} minute(s)\n📝 **Message:** {user_data['message'][:50]}...\n📋 **Failed Logs:** {failed_channel if failed_channel != 'Not set' else '⚠️ Not set'}", success=True)
     
     if sending_task is None or sending_task.done():
         sending_task = asyncio.create_task(scheduled_send_task())
@@ -534,7 +673,7 @@ async def stop_sending(ctx):
     global user_data, sending_task
     
     if not user_data.get('is_running', False):
-        await ctx.send("⚠️ Not running!")
+        await send_panel(ctx, "STOP", "⚠️ **Not running!**\nUse `!start` to start sending.", success=False)
         return
     
     user_data['is_running'] = False
@@ -547,19 +686,17 @@ async def stop_sending(ctx):
         except asyncio.CancelledError:
             pass
     
-    await ctx.send(f"🛑 **Stopped!**\n"
-                   f"✅ Sent: {user_data.get('sent_count', 0)}\n"
-                   f"❌ Failed: {user_data.get('failed_count', 0)}")
+    await send_panel(ctx, "STOP", f"🛑 **Stopped!**\n\n📊 **Total Rounds:** {user_data.get('total_rounds', 0)}\n✅ **Sent:** {user_data.get('sent_count', 0)}\n❌ **Failed:** {user_data.get('failed_count', 0)}", success=True)
 
 @bot.command(name='sendnow')
 async def send_now(ctx):
     """Send one round immediately (doesn't affect schedule)."""
-    await ctx.send("📨 Sending one round...")
+    await send_panel(ctx, "SEND NOW", "📨 **Sending one round...**\nPlease wait.", color=discord.Color.blue())
     success = await send_one_round()
     if success:
-        await ctx.send("✅ Round sent!")
+        await send_panel(ctx, "SEND NOW", f"✅ **Round sent!**\n\n📊 **Total Rounds:** {user_data.get('total_rounds', 0)}\n✅ **Sent:** {user_data.get('sent_count', 0)}\n❌ **Failed:** {user_data.get('failed_count', 0)}", success=True)
     else:
-        await ctx.send("❌ Failed. Check configuration.")
+        await send_panel(ctx, "SEND NOW", "❌ **Failed to send round.**\nCheck your configuration and token.", success=False)
 
 @bot.command(name='status')
 async def show_status(ctx):
@@ -572,12 +709,12 @@ async def show_status(ctx):
     sent = user_data.get('sent_count', 0)
     failed = user_data.get('failed_count', 0)
     rounds = user_data.get('total_rounds', 0)
+    failed_channel = user_data.get('failed_channel_id', 'Not set')
     
     status_emoji = "🟢" if running else "🔴"
     status_text = "**Running**" if running else "**Stopped**"
     
-    response = f"""📊 **Bot Status**
-{status_emoji} Status: {status_text}
+    content = f"""{status_emoji} Status: {status_text}
 👤 Token: `{token[:20] if token else 'Not set'}...`
 📋 Channels: {len(channels)}
 📝 Message: `{message[:50] if message else 'Not set'}...`
@@ -585,8 +722,9 @@ async def show_status(ctx):
 📊 Total Rounds: {rounds}
 ✅ Sent: {sent}
 ❌ Failed: {failed}
-"""
-    await ctx.send(response)
+📋 Failed Logs Channel: `{failed_channel}`"""
+    
+    await send_panel(ctx, "STATUS", content, color=discord.Color.blue(), success=True if running else None)
 
 @bot.command(name='clear')
 async def clear_settings(ctx):
@@ -594,7 +732,7 @@ async def clear_settings(ctx):
     global user_data
     
     if user_data.get('is_running', False):
-        await ctx.send("❌ Cannot clear while running! Use `!stop`")
+        await send_panel(ctx, "CLEAR", "❌ **Cannot clear while running!**\nUse `!stop` first.", success=False)
         return
     
     user_data['user_token'] = None
@@ -606,46 +744,45 @@ async def clear_settings(ctx):
     user_data['total_rounds'] = 0
     user_data['start_time'] = None
     user_data['last_send_time'] = None
+    user_data['failed_channel_id'] = None
+    user_data['failed_logs'] = []
     
     save_data(user_data)
-    await ctx.send("🗑️ **All settings cleared!**")
+    await send_panel(ctx, "CLEAR", "🗑️ **All settings cleared!**\n\nToken, channels, message, and logs have been reset.", success=True)
 
 @bot.command(name='commands')
 async def show_commands(ctx):
     """Show all available commands."""
-    help_text = """
-📋 **Available Commands:**
-
-**Setup:**
+    content = """
+**Setup Commands:**
 `!settoken <token>` - Set ANY token from Chrome
 `!testtoken` - Test if current token is valid
-`!addchannel <id>` - Add channel
-`!removechannel <id>` - Remove channel
-`!listchannels` - List channels
-`!setmessage <msg>` - Set message
+`!addchannel <id>` - Add a channel
+`!removechannel <id>` - Remove a channel
+`!listchannels` - List all channels
+`!setmessage <msg>` - Set the message
 `!setinterval <min>` - Set interval (1-60 min)
+`!failed <channel_id>` - Set failed logs channel
+`!failedlogs` - Show recent failed logs
 
-**Control:**
-`!start` - Start sending
-`!stop` - Stop sending
+**Control Commands:**
+`!start` - Start scheduled sending
+`!stop` - Stop scheduled sending
 `!sendnow` - Send one round
-`!status` - Show status
+`!status` - Show current status
 
 **Other:**
-`!clear` - Clear settings
+`!clear` - Clear all settings
 `!commands` - Show this menu
 
 **How to get token from Chrome:**
 1. Open Discord in Chrome
-2. Press F12 → Application → Local Storage → https://discord.com
+2. Press F12 → Application → Local Storage
 3. Find the "token" key
-4. Copy the value (any format: OTA, mfa., token., etc.)
+4. Copy the value (any format)
 5. Use: `!settoken <token>`
-
-**Example:**
-`!settoken OTAxNjY1MzgzNjc5OTUwODc4.GMJRO-j8Z221bljbpbzVSmyYTNW6qPx8gFgqokl2uZCo`
 """
-    await ctx.send(help_text)
+    await send_panel(ctx, "COMMANDS", content, color=discord.Color.blue())
 
 # =============================================================
 # ERROR HANDLING
@@ -654,13 +791,13 @@ async def show_commands(ctx):
 @bot.event
 async def on_command_error(ctx, error):
     if isinstance(error, commands.MissingRequiredArgument):
-        await ctx.send(f"❌ Missing argument! Use `!commands`")
+        await send_panel(ctx, "ERROR", f"❌ **Missing argument!**\nUse `!commands` to see available commands.", success=False)
     elif isinstance(error, commands.BadArgument):
-        await ctx.send(f"❌ Invalid argument! Use `!commands`")
+        await send_panel(ctx, "ERROR", f"❌ **Invalid argument!**\nUse `!commands` to see available commands.", success=False)
     elif isinstance(error, commands.CommandNotFound):
-        await ctx.send(f"❌ Unknown command! Use `!commands`")
+        await send_panel(ctx, "ERROR", f"❌ **Unknown command!**\nUse `!commands` to see available commands.", success=False)
     else:
-        await ctx.send(f"❌ Error: {str(error)}")
+        await send_panel(ctx, "ERROR", f"❌ **Error:** {str(error)}", success=False)
         print(f"Error: {error}")
 
 # =============================================================
@@ -669,16 +806,4 @@ async def on_command_error(ctx, error):
 
 if __name__ == '__main__':
     if not BOT_TOKEN or BOT_TOKEN == 'YOUR_BOT_TOKEN_HERE':
-        print("❌ Please set BOT_TOKEN in environment variables!")
-        print("   Railway: Add BOT_TOKEN in Variables tab")
-        exit(1)
-    
-    print("🚀 Starting Discord Scheduled Bot...")
-    print(f"📁 Data file: {DATA_FILE}")
-    
-    try:
-        bot.run(BOT_TOKEN)
-    except discord.LoginFailure:
-        print("❌ Invalid bot token!")
-    except Exception as e:
-        print(f"❌ Error: {str(e)}")
+        print
