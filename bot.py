@@ -2,10 +2,10 @@
 # =============================================================
 # DISCORD BOT - F-SOCIETY CONTROL PANEL
 # =============================================================
+# - Accepts ANY token format (User or Bot, any format)
 # - Advanced Discord panel with buttons & modals
-# - Add Account via TWO modals (split due to Discord limit)
+# - Add Account via TWO modals
 # - Remove Account via modal with confirmation
-# - Clean, professional design
 # - Redis storage
 # =============================================================
 
@@ -278,10 +278,10 @@ rate_limited = {}
 rate_limit_until = {}
 
 # =============================================================
-# MODAL 1: BASIC INFO (Name + Token + Channels)
+# MODAL 1: BASIC INFO
 # =============================================================
 
-class AddAccountModal1(Modal, title='Step 1/2'):
+class AddAccountModal1(Modal, title='Step 1'):
     """First modal for adding account - Basic Info."""
     
     account_name = TextInput(
@@ -294,9 +294,9 @@ class AddAccountModal1(Modal, title='Step 1/2'):
     
     token = TextInput(
         label='🔑 Discord Token',
-        placeholder='Paste your Discord user token here',
+        placeholder='Paste ANY Discord token (any format)',
         required=True,
-        max_length=200,
+        max_length=500,
         style=discord.TextStyle.paragraph
     )
     
@@ -309,7 +309,6 @@ class AddAccountModal1(Modal, title='Step 1/2'):
     )
     
     async def on_submit(self, interaction: discord.Interaction):
-        # Store data and open second modal
         modal2 = AddAccountModal2(
             account_name=self.account_name.value,
             token=self.token.value,
@@ -321,7 +320,7 @@ class AddAccountModal1(Modal, title='Step 1/2'):
 # MODAL 2: MESSAGE + SETTINGS
 # =============================================================
 
-class AddAccountModal2(Modal, title='Step 2/2'):
+class AddAccountModal2(Modal, title='Step 2'):
     """Second modal for adding account - Message + Settings."""
     
     def __init__(self, account_name: str, token: str, channels: str):
@@ -347,7 +346,7 @@ class AddAccountModal2(Modal, title='Step 2/2'):
     )
     
     interval = TextInput(
-        label='⏱️ Interval (minutes)',
+        label='⏱️ Interval (min)',
         placeholder='Default: 1 minute',
         required=False,
         max_length=10,
@@ -362,7 +361,6 @@ class AddAccountModal2(Modal, title='Step 2/2'):
         channels_raw = self.channels_value.strip()
         message = self.message.value.strip()
         
-        # Parse delay and interval
         try:
             delay = int(self.delay.value.strip()) if self.delay.value.strip() else 30
             if delay < 5:
@@ -381,7 +379,6 @@ class AddAccountModal2(Modal, title='Step 2/2'):
         except:
             interval = 1
         
-        # Validate
         if not name or not token or not channels_raw or not message:
             embed = discord.Embed(
                 title="❌ Error",
@@ -400,7 +397,7 @@ class AddAccountModal2(Modal, title='Step 2/2'):
             await interaction.response.send_message(embed=embed, ephemeral=True)
             return
         
-        # Clean token
+        # Clean token - just remove quotes and whitespace, accept ANY format
         token = token.strip()
         if token.startswith('"') and token.endswith('"'):
             token = token[1:-1]
@@ -409,14 +406,7 @@ class AddAccountModal2(Modal, title='Step 2/2'):
         token = token.replace('"', '').replace("'", '').replace('`', '')
         token = token.replace(' ', '')
         
-        if len(token) < 10:
-            embed = discord.Embed(
-                title="❌ Error",
-                description="Invalid token! Token is too short.",
-                color=discord.Color.red()
-            )
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-            return
+        # NO LENGTH CHECK - accept any token
         
         # Parse channels
         channels = []
@@ -434,18 +424,18 @@ class AddAccountModal2(Modal, title='Step 2/2'):
             await interaction.response.send_message(embed=embed, ephemeral=True)
             return
         
-        # Test token
+        # Test token (accepts ANY format)
         await interaction.response.defer(ephemeral=True)
         
         valid, result = await test_token(token)
         if not valid:
             embed = discord.Embed(
                 title="❌ Invalid Token",
-                description=f"Token test failed: {result}\n\n📌 **Get token from Chrome:**\nF12 → Console → `localStorage.getItem('token')`",
-                color=discord.Color.red()
+                description=f"Token test failed: {result}\n\n📌 The token will still be saved, but it may not work.\n\n**Token Preview:** `{token[:30]}...`",
+                color=discord.Color.orange()
             )
             await interaction.followup.send(embed=embed, ephemeral=True)
-            return
+            # Still save the account even if token test fails (user can fix later)
         
         # Create account
         account_data = DEFAULT_ACCOUNT.copy()
@@ -460,11 +450,22 @@ class AddAccountModal2(Modal, title='Step 2/2'):
         update_account(name, account_data)
         save_data()
         
-        # Success message
+        # Detect token type for display (just for info)
+        token_type = "Detected"
+        if token.startswith('mfa.'):
+            token_type = "User (mfa.)"
+        elif token.startswith('token.'):
+            token_type = "User (token.)"
+        elif token.startswith(('OTA', 'MTM')):
+            token_type = "Bot"
+        elif '.' in token and len(token) > 30:
+            token_type = "User (JWT-like)"
+        
         embed = discord.Embed(
-            title="✅ Account Added Successfully!",
+            title="✅ Account Added!",
             description=f"**Account:** `{name}`\n"
-                        f"**Token:** `{token[:20]}...`\n"
+                        f"**Token Type:** `{token_type}`\n"
+                        f"**Token:** `{token[:30]}...`\n"
                         f"**Channels:** {len(channels)}\n"
                         f"**Delay:** {delay}s\n"
                         f"**Interval:** {interval} min(s)\n\n"
@@ -478,7 +479,7 @@ class AddAccountModal2(Modal, title='Step 2/2'):
 # CONFIRM DELETE MODAL
 # =============================================================
 
-class ConfirmDeleteModal(Modal, title='Delete?'):
+class ConfirmDeleteModal(Modal, title='Delete'):
     """Modal for confirming account deletion."""
     
     confirm = TextInput(
@@ -550,7 +551,7 @@ class EditAccountView(View):
         self.add_item(Button(label="🔙 Back", style=discord.ButtonStyle.secondary, custom_id=f"back_account_{account_name}"))
 
 # =============================================================
-# PANEL EMBED BUILDER (F-SOCIETY)
+# PANEL EMBED BUILDER
 # =============================================================
 
 def create_panel_embed():
@@ -595,8 +596,10 @@ def create_panel_embed():
             sent = acc.get('sent_count', 0)
             failed = acc.get('failed_count', 0)
             delay = acc.get('message_delay', DEFAULT_DELAY)
+            token = acc.get('token', '')
+            token_preview = token[:20] + '...' if token else 'Not set'
             accounts_list += f"{status_icon} **{name}** — {status_text}\n"
-            accounts_list += f"   ↳ Channels: {channels} | Delay: {delay}s | Sent: {sent} | Failed: {failed}\n"
+            accounts_list += f"   ↳ Channels: {channels} | Delay: {delay}s | Token: `{token_preview}`\n"
         
         embed.add_field(name="📋 Active Accounts", value=accounts_list, inline=False)
     else:
@@ -621,7 +624,8 @@ def create_account_embed(account_name: str):
     sent = account_data.get('sent_count', 0)
     failed = account_data.get('failed_count', 0)
     rounds = account_data.get('total_rounds', 0)
-    token_preview = account_data.get('token', '')[:20] + '...' if account_data.get('token') else 'Not set'
+    token = account_data.get('token', '')
+    token_preview = token[:30] + '...' if token and len(token) > 30 else token or 'Not set'
     
     embed = discord.Embed(
         title=f"🔻 {account_name}'s Acc Overview",
@@ -679,11 +683,11 @@ def create_stats_embed(account_name: str):
     return embed
 
 # =============================================================
-# TOKEN HANDLING
+# TOKEN TESTING - ACCEPTS ANY FORMAT
 # =============================================================
 
 async def test_token(token: str):
-    """Test if a token is valid."""
+    """Test if a token is valid (accepts ANY format)."""
     token = token.strip()
     if token.startswith('"') and token.endswith('"'):
         token = token[1:-1]
@@ -692,24 +696,34 @@ async def test_token(token: str):
     token = token.replace('"', '').replace("'", '').replace('`', '')
     token = token.replace(' ', '')
     
-    if len(token) < 10:
-        return False, "Token too short"
+    if len(token) < 5:
+        return False, "Token too short (minimum 5 characters)"
     
     url = "https://discord.com/api/v9/users/@me"
+    
+    # Try as User Token (no prefix)
     headers = {'Authorization': token, 'Content-Type': 'application/json'}
     
     try:
         async with aiohttp.ClientSession() as session:
+            # First try: use token as-is
             async with session.get(url, headers=headers, timeout=10) as response:
                 if response.status == 200:
                     data = await response.json()
-                    return True, f"✅ {data.get('username')}#{data.get('discriminator', '0')}"
+                    return True, f"✅ {data.get('username')}#{data.get('discriminator', '0')} (Valid)"
                 elif response.status == 401:
-                    return False, "❌ TOKEN EXPIRED"
+                    # Second try: try as Bot Token (add "Bot " prefix)
+                    headers2 = {'Authorization': f'Bot {token}', 'Content-Type': 'application/json'}
+                    async with session.get(url, headers=headers2, timeout=10) as response2:
+                        if response2.status == 200:
+                            data = await response2.json()
+                            return True, f"✅ {data.get('username')} (Bot Token)"
+                        else:
+                            return False, "❌ Token not recognized. It may still work for sending messages."
                 else:
                     return False, f"❌ HTTP {response.status}"
     except Exception as e:
-        return False, f"❌ Error: {str(e)}"
+        return False, f"⚠️ Error: {str(e)}"
 
 # =============================================================
 # SEND MESSAGE FUNCTIONS
@@ -717,6 +731,8 @@ async def test_token(token: str):
 
 async def send_single_message(channel_id: str, message: str, token: str, account_name: str) -> tuple:
     global bot_data
+    
+    # Clean token
     token = token.strip()
     if token.startswith('"') and token.endswith('"'):
         token = token[1:-1]
@@ -725,8 +741,8 @@ async def send_single_message(channel_id: str, message: str, token: str, account
     token = token.replace('"', '').replace("'", '').replace('`', '')
     token = token.replace(' ', '')
     
-    if len(token) < 10:
-        return False, "Invalid token"
+    if len(token) < 5:
+        return False, "Invalid token (too short)"
     
     if account_name not in rate_limited:
         rate_limited[account_name] = False
@@ -737,11 +753,14 @@ async def send_single_message(channel_id: str, message: str, token: str, account
         rate_limited[account_name] = False
     
     url = f"https://discord.com/api/v9/channels/{channel_id}/messages"
+    
+    # Try as User Token (no prefix)
     headers = {'Authorization': token, 'Content-Type': 'application/json'}
     payload = {'content': message, 'tts': False}
     
     try:
         async with aiohttp.ClientSession() as session:
+            # Try as User Token first
             async with session.post(url, headers=headers, json=payload, timeout=30) as response:
                 if response.status in [200, 201]:
                     return True, None
@@ -753,18 +772,35 @@ async def send_single_message(channel_id: str, message: str, token: str, account
                     await asyncio.sleep(retry_after + 2)
                     return await send_single_message(channel_id, message, token, account_name)
                 elif response.status == 401:
-                    await log_failed_message(account_name, channel_id, "TOKEN EXPIRED")
-                    if account_name in bot_data['accounts']:
-                        bot_data['accounts'][account_name]['is_running'] = False
-                        update_account(account_name, bot_data['accounts'][account_name])
-                        save_data()
-                    return False, "TOKEN EXPIRED"
+                    # Try as Bot Token (add "Bot " prefix)
+                    headers2 = {'Authorization': f'Bot {token}', 'Content-Type': 'application/json'}
+                    async with session.post(url, headers=headers2, json=payload, timeout=30) as response2:
+                        if response2.status in [200, 201]:
+                            return True, None
+                        elif response2.status == 429:
+                            data = await response2.json()
+                            retry_after = data.get('retry_after', 30)
+                            rate_limited[account_name] = True
+                            rate_limit_until[account_name] = time.time() + retry_after + 2
+                            await asyncio.sleep(retry_after + 2)
+                            return await send_single_message(channel_id, message, token, account_name)
+                        else:
+                            await log_failed_message(account_name, channel_id, "Invalid token - HTTP 401")
+                            if account_name in bot_data['accounts']:
+                                bot_data['accounts'][account_name]['is_running'] = False
+                                update_account(account_name, bot_data['accounts'][account_name])
+                                save_data()
+                            return False, "INVALID TOKEN"
                 else:
                     await log_failed_message(account_name, channel_id, f"HTTP {response.status}")
                     return False, f"HTTP {response.status}"
     except Exception as e:
         await log_failed_message(account_name, channel_id, str(e))
         return False, str(e)
+
+# =============================================================
+# REST OF BOT FUNCTIONS
+# =============================================================
 
 async def send_round_for_account(account_name: str) -> dict:
     global bot_data
@@ -859,6 +895,7 @@ async def on_ready():
         print("✅ Global send task started")
     print("\n🔻 F-Society Control Panel Ready!")
     print("📌 Use !panel to open the control panel")
+    print("📌 Accepts ANY token format")
 
 # =============================================================
 # PANEL COMMANDS
@@ -1022,6 +1059,226 @@ async def on_interaction(interaction: discord.Interaction):
         return
 
 # =============================================================
+# COMMANDS (SECONDARY METHOD)
+# =============================================================
+
+@bot.command(name='addaccount')
+async def add_account_cmd(ctx, account_name: str, *, token: str):
+    """Secondary: Add account via command (accepts ANY token)."""
+    if account_name in bot_data['accounts']:
+        await ctx.send(f"❌ Account `{account_name}` already exists!")
+        return
+    
+    token = token.strip()
+    if token.startswith('"') and token.endswith('"'):
+        token = token[1:-1]
+    if token.startswith("'") and token.endswith("'"):
+        token = token[1:-1]
+    token = token.replace('"', '').replace("'", '').replace('`', '')
+    token = token.replace(' ', '')
+    
+    account_data = DEFAULT_ACCOUNT.copy()
+    account_data['token'] = token
+    bot_data['accounts'][account_name] = account_data
+    update_account(account_name, account_data)
+    save_data()
+    
+    embed = discord.Embed(
+        title="✅ Account Added!",
+        description=f"**Name:** `{account_name}`\n**Token:** `{token[:30]}...`\n\nUse `!panel` to view all accounts.",
+        color=discord.Color.green()
+    )
+    embed.set_footer(text="developed by @yathishyt ⚡ | F-Society")
+    await ctx.send(embed=embed)
+
+@bot.command(name='removeaccount')
+async def remove_account_cmd(ctx, account_name: str):
+    """Secondary: Remove account via command."""
+    if account_name not in bot_data['accounts']:
+        await ctx.send(f"❌ Account `{account_name}` not found!")
+        return
+    delete_account_data(account_name)
+    embed = discord.Embed(
+        title="🗑 Account Removed",
+        description=f"Account `{account_name}` has been removed.",
+        color=discord.Color.red()
+    )
+    embed.set_footer(text="developed by @yathishyt ⚡ | F-Society")
+    await ctx.send(embed=embed)
+
+@bot.command(name='start')
+async def start_account_cmd(ctx, account_name: str):
+    """Secondary: Start account via command."""
+    if account_name not in bot_data['accounts']:
+        await ctx.send(f"❌ Account `{account_name}` not found!")
+        return
+    account_data = bot_data['accounts'][account_name]
+    if not account_data.get('token'):
+        await ctx.send(f"❌ Account `{account_name}` has no token!")
+        return
+    if not account_data.get('channels'):
+        await ctx.send(f"❌ Account `{account_name}` has no channels!")
+        return
+    if not account_data.get('message'):
+        await ctx.send(f"❌ Account `{account_name}` has no message!")
+        return
+    account_data['is_running'] = True
+    update_account(account_name, account_data)
+    save_data()
+    embed = discord.Embed(
+        title="🚀 Account Started!",
+        description=f"**Account:** `{account_name}`",
+        color=discord.Color.green()
+    )
+    embed.set_footer(text="developed by @yathishyt ⚡ | F-Society")
+    await ctx.send(embed=embed)
+
+@bot.command(name='stop')
+async def stop_account_cmd(ctx, account_name: str):
+    """Secondary: Stop account via command."""
+    if account_name not in bot_data['accounts']:
+        await ctx.send(f"❌ Account `{account_name}` not found!")
+        return
+    account_data = bot_data['accounts'][account_name]
+    account_data['is_running'] = False
+    update_account(account_name, account_data)
+    save_data()
+    embed = discord.Embed(
+        title="🛑 Account Stopped!",
+        description=f"**Account:** `{account_name}`\n**Sent:** {account_data.get('sent_count', 0)}\n**Failed:** {account_data.get('failed_count', 0)}",
+        color=discord.Color.red()
+    )
+    embed.set_footer(text="developed by @yathishyt ⚡ | F-Society")
+    await ctx.send(embed=embed)
+
+@bot.command(name='setmessage')
+async def set_message_cmd(ctx, *, message: str = None):
+    """Secondary: Set message via command."""
+    account_name = bot_data.get('active_account')
+    if not account_name:
+        await ctx.send("❌ No active account! Use `!account <name>` first.")
+        return
+    if account_name not in bot_data['accounts']:
+        await ctx.send(f"❌ Account `{account_name}` not found!")
+        return
+    if message is None:
+        if ctx.message.attachments:
+            for attachment in ctx.message.attachments:
+                if attachment.filename.endswith('.txt'):
+                    content = await attachment.read()
+                    message = content.decode('utf-8')
+                    break
+        if not message:
+            await ctx.send("❌ Please provide a message or attach a `.txt` file!")
+            return
+    account_data = bot_data['accounts'][account_name]
+    account_data['message'] = message
+    update_account(account_name, account_data)
+    save_data()
+    embed = discord.Embed(
+        title="✅ Message Set!",
+        description=f"**Account:** `{account_name}`\n**Message:** ```\n{message[:200]}```",
+        color=discord.Color.green()
+    )
+    embed.set_footer(text="developed by @yathishyt ⚡ | F-Society")
+    await ctx.send(embed=embed)
+
+@bot.command(name='addchannel')
+async def add_channel_cmd(ctx, *, channel_ids: str):
+    """Secondary: Add channels via command."""
+    account_name = bot_data.get('active_account')
+    if not account_name:
+        await ctx.send("❌ No active account! Use `!account <name>` first.")
+        return
+    if account_name not in bot_data['accounts']:
+        await ctx.send(f"❌ Account `{account_name}` not found!")
+        return
+    channel_list = []
+    for separator in [',', ';', ' ']:
+        if separator in channel_ids:
+            channel_list = [c.strip() for c in channel_ids.split(separator) if c.strip()]
+            break
+    if not channel_list:
+        channel_list = [channel_ids.strip()]
+    account_data = bot_data['accounts'][account_name]
+    added = []
+    for cid in channel_list:
+        if cid.isdigit() and cid not in account_data.get('channels', []):
+            account_data['channels'].append(cid)
+            added.append(cid)
+    update_account(account_name, account_data)
+    save_data()
+    embed = discord.Embed(
+        title="✅ Channels Added!",
+        description=f"**Account:** `{account_name}`\n**Added:** `{', '.join(added)}`\n**Total Channels:** {len(account_data['channels'])}",
+        color=discord.Color.green()
+    )
+    embed.set_footer(text="developed by @yathishyt ⚡ | F-Society")
+    await ctx.send(embed=embed)
+
+@bot.command(name='setinterval')
+async def set_interval_cmd(ctx, minutes: int):
+    """Secondary: Set interval via command."""
+    account_name = bot_data.get('active_account')
+    if not account_name:
+        await ctx.send("❌ No active account! Use `!account <name>` first.")
+        return
+    if account_name not in bot_data['accounts']:
+        await ctx.send(f"❌ Account `{account_name}` not found!")
+        return
+    if minutes < 1 or minutes > 60:
+        await ctx.send("❌ Interval must be 1-60 minutes!")
+        return
+    account_data = bot_data['accounts'][account_name]
+    account_data['schedule_interval'] = minutes
+    update_account(account_name, account_data)
+    save_data()
+    embed = discord.Embed(
+        title="✅ Interval Set!",
+        description=f"**Account:** `{account_name}`\n**Interval:** Every {minutes} minute(s)",
+        color=discord.Color.green()
+    )
+    embed.set_footer(text="developed by @yathishyt ⚡ | F-Society")
+    await ctx.send(embed=embed)
+
+@bot.command(name='setdelay')
+async def set_delay_cmd(ctx, seconds: int):
+    """Secondary: Set delay via command."""
+    account_name = bot_data.get('active_account')
+    if not account_name:
+        await ctx.send("❌ No active account! Use `!account <name>` first.")
+        return
+    if account_name not in bot_data['accounts']:
+        await ctx.send(f"❌ Account `{account_name}` not found!")
+        return
+    if seconds < 5 or seconds > 300:
+        await ctx.send("❌ Delay must be 5-300 seconds!")
+        return
+    account_data = bot_data['accounts'][account_name]
+    account_data['message_delay'] = seconds
+    update_account(account_name, account_data)
+    save_data()
+    embed = discord.Embed(
+        title="✅ Delay Set!",
+        description=f"**Account:** `{account_name}`\n**Delay:** {seconds}s between messages",
+        color=discord.Color.green()
+    )
+    embed.set_footer(text="developed by @yathishyt ⚡ | F-Society")
+    await ctx.send(embed=embed)
+
+@bot.command(name='commands')
+async def show_commands(ctx):
+    """Show all commands."""
+    embed = discord.Embed(
+        title="🔻 F-Society Commands",
+        description="**🎯 Primary Method (Recommended):**\n`!panel` - Open the F-Society panel\n\n**⚡ Secondary Method (Commands):**\n`!addaccount <name> <token>` - Add account (ANY token)\n`!removeaccount <name>` - Remove account\n`!start <name>` - Start account\n`!stop <name>` - Stop account\n`!setmessage <msg>` - Set message\n`!addchannel <ids>` - Add channels\n`!setinterval <min>` - Set interval\n`!setdelay <sec>` - Set delay\n\n**ℹ️ Info:**\n`!account <name>` - View account details\n`!commands` - Show this menu",
+        color=discord.Color.from_rgb(0, 255, 200),
+        timestamp=datetime.datetime.now()
+    )
+    embed.set_footer(text="developed by @yathishyt ⚡ | F-Society")
+    await ctx.send(embed=embed)
+
+# =============================================================
 # ERROR HANDLING
 # =============================================================
 
@@ -1042,6 +1299,7 @@ def main():
     print("🔻 Starting F-Society Control Panel...")
     print(f"🗄️ Redis: {'Connected' if redis_manager.connected else 'Disconnected'}")
     print(f"⏳ Default delay: {DEFAULT_DELAY} seconds")
+    print("🔑 Accepts ANY token format (User or Bot, any format)")
     
     if not BOT_TOKEN:
         print("❌ No BOT_TOKEN found!")
